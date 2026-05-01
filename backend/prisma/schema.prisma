@@ -1,0 +1,39 @@
+generator client {
+  provider        = "prisma-client-js"
+  // This preview feature allows us to install Postgres extensions via Prisma
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql" 
+  // This single line tells Supabase to activate pgvector
+  extensions = [vector]
+}
+
+model Company {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name               String
+  email              String   @unique
+  password           String
+  description        String?  
+  googleRefreshToken String?  
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  appointments       Appointment[]
+}
+model Appointment {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId        String   @db.Uuid
+  company          Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // The Data the Organization needs on their Dashboard
+  customerName     String
+  customerEmail    String
+  customerPhone    String
+  issueDescription String
+  
+  appointmentTime  DateTime // The start time in UTC (we convert to IST on the frontend)
+  trackingToken    String   @unique
+  
+  createdAt        DateTime @default(now())
+}

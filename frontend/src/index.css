@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+/* A little custom CSS to make our scrollbar look sleek inside the chat window */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 10px;
+}
