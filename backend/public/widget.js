@@ -18,7 +18,10 @@
   // 2. INJECT THE HTML
   const widgetHtml = `
     <div id="plumber-chat-widget">
-      <div id="chat-header">Plumbing Assistant</div>
+      <div id="chat-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <span>Plumbing Assistant</span>
+        <button id="ai-call-btn" style="background: #ef4444; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold;">📞 Call Support</button>
+      </div>
       <div id="chat-messages"></div>
       <div id="chat-controls">
         <input type="file" id="chat-file" accept="image/*" style="display:none;">
@@ -41,7 +44,7 @@
   // Grab the company ID from the script tag
   const scriptTag = document.currentScript;
   const companyId = scriptTag.getAttribute('data-company-id');
-
+  const BACKEND_URL = new URL(scriptTag.src).origin;
   // Trigger the hidden file input when the camera button is clicked
   cameraBtn.addEventListener('click', () => {
     fileField.click();
@@ -91,7 +94,7 @@
     if (sessionId) formData.append('sessionId', sessionId);
 
     try {
-      const response = await fetch('/api/v1/chat', {
+      const response = await fetch(`${BACKEND_URL}/api/v1/chat`, {
         method: 'POST',
         body: formData
       });
@@ -108,4 +111,68 @@
   inputField.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
 
   addMessage("Hi! Describe your plumbing issue or upload a photo, and I'll help you book a pro.", 'bot');
+  const retellScript = document.createElement('script');
+  retellScript.src = "https://cdn.jsdelivr.net/npm/retell-client-javascript-sdk@2.0.0/dist/index.js"; 
+  document.head.appendChild(retellScript);
+
+  const callButton = document.getElementById('ai-call-btn');
+  let retellWebClient = null;
+
+  retellScript.onload = () => {
+    // Initialize the client once the script loads
+    retellWebClient = new RetellWebClient();
+    
+    retellWebClient.on("call_started", () => console.log("Audio stream active!"));
+    retellWebClient.on("call_ended", () => endVoiceCall());
+  };
+
+  async function startVoiceCall() {
+    if (!retellWebClient) return;
+    
+    try {
+      callButton.innerText = "Connecting...";
+      callButton.disabled = true;
+
+      let sessionId = localStorage.getItem('chatSessionId') || "new-session";
+
+      // 1. Ask your backend for the access token using the dynamic URL
+      const response = await fetch(`${BACKEND_URL}/api/v1/voice/create-web-call`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          sessionId: sessionId, 
+          companyId: companyId 
+        })
+      });
+      
+      if (!response.ok) throw new Error("Failed to get token");
+      const data = await response.json();
+
+      // 2. Pass token to Retell
+      await retellWebClient.startCall({
+        accessToken: data.accessToken,
+      });
+
+      callButton.innerText = "🛑 End Call";
+      callButton.disabled = false;
+      callButton.onclick = endVoiceCall; 
+
+    } catch (error) {
+      console.error("Failed to start call:", error);
+      callButton.innerText = "Call Failed";
+      setTimeout(() => {
+        callButton.innerText = "📞 Call Support";
+        callButton.disabled = false;
+        callButton.onclick = startVoiceCall;
+      }, 3000);
+    }
+  }
+
+  function endVoiceCall() {
+    if (retellWebClient) retellWebClient.stopCall();
+    callButton.innerText = "📞 Call Support";
+    callButton.onclick = startVoiceCall; 
+  }
+
+  callButton.addEventListener('click', startVoiceCall);
 })();

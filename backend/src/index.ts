@@ -1,4 +1,4 @@
-import app from "./app.js";
+import server from "./app.js";
 import { db } from "./db/index.js";
 import { env } from "./config/env.js";
 
@@ -8,7 +8,7 @@ const startServer = async () => {
     await db.$connect();
     console.log("✅ Successfully connected to Supabase PostgreSQL.");
 
-    app.listen(env.PORT, () => {
+    server.listen(env.PORT, () => {
       console.log(`🚀 Server is listening on http://localhost:${env.PORT}`);
     });
   } catch (error) {

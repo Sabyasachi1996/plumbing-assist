@@ -5,6 +5,7 @@ import { googleAuthController } from "../../controllers/v1/google-auth.controlle
 import { chatController } from "../../controllers/v1/chat.controller.js";
 import { authController } from "../../controllers/v1/auth.controller.js";
 import { appointmentController } from "../../controllers/v1/appointment.controller.js";
+import { voiceController } from "../../controllers/v1/voice.controller.js";
 const upload = multer({ storage: multer.memoryStorage() });
 router.post("/auth/register", authController.register);
 router.post("/auth/login", authController.login);
@@ -13,4 +14,5 @@ router.get("/auth/google/callback", googleAuthController.callback);
 router.get("/auth/status", authController.getStatus);
 router.post("/chat",upload.single("image"), chatController.handleChat);
 router.get("/appointments", appointmentController.getAppointments);
+router.post("/voice/create-web-call", voiceController.createWebCall);
 export default router;
