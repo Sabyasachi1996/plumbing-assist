@@ -28,4 +28,23 @@ export const redisService = {
       console.error("Redis Save Error:", error);
     }
   },
+  // Save the mapping for 1 hour (expires automatically so your DB stays clean)
+  async saveCallVariables(callId: string, variables: { sessionId: string, companyId: string }) {
+    await redis.set(`call_vars_${callId}`, JSON.stringify(variables),{ ex: 3600 });
+  },
+
+  async getCallVariables(callId: string) {
+    const data = await redis.get(`call_vars_${callId}`);
+    
+    if (!data) return null;
+
+    // FIX: Upstash Redis automatically parses JSON into an object. 
+    // If it's already an object, just return it directly!
+    if (typeof data === 'object') {
+      return data;
+    }
+
+    // Fallback just in case it was stored as a raw string
+    return JSON.parse(data as string);
+  }
 };

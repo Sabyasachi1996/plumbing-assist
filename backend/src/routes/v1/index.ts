@@ -15,4 +15,5 @@ router.get("/auth/status", authController.getStatus);
 router.post("/chat",upload.single("image"), chatController.handleChat);
 router.get("/appointments", appointmentController.getAppointments);
 router.post("/voice/create-web-call", voiceController.createWebCall);
+router.get("/chat/history", chatController.getHistory);
 export default router;

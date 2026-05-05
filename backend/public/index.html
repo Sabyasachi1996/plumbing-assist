@@ -3,6 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="
+    script-src 'self' 'unsafe-inline' https://esm.sh https://moltenly-undeflective-carol.ngrok-free.dev; 
+    connect-src 'self' https://moltenly-undeflective-carol.ngrok-free.dev wss://api.retellai.com https://api.retellai.com https://*.livekit.cloud wss://*.livekit.cloud https://esm.sh;
+    ">
     <title>Bob's Plumbing Co.</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 50px; background-color: #f4f4f9; }
@@ -19,6 +23,9 @@
 
     <!-- THIS IS THE MAGIC SCRIPT THE ORGANIZATION WILL EMBED -->
     <!-- Replace the data-company-id with your actual testing UUID! -->
-    <script src="/widget.js" data-company-id="ea8438c6-d6fa-4eaa-a04c-27d895d36d4d"></script>
+    <script 
+    src="https://moltenly-undeflective-carol.ngrok-free.dev/widget.js" 
+    data-company-id="ea8438c6-d6fa-4eaa-a04c-27d895d36d4d">
+    </script>
 </body>
 </html>

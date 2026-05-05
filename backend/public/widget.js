@@ -45,6 +45,19 @@
   const scriptTag = document.currentScript;
   const companyId = scriptTag.getAttribute('data-company-id');
   const BACKEND_URL = new URL(scriptTag.src).origin;
+  // 🔒 UNIVERSAL SESSION ID LOCK
+  function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
+  let chatSessionId = localStorage.getItem('chatSessionId');
+  if (!chatSessionId) {
+    chatSessionId = generateUUID();
+    localStorage.setItem('chatSessionId', chatSessionId);
+  }
   // Trigger the hidden file input when the camera button is clicked
   cameraBtn.addEventListener('click', () => {
     fileField.click();
@@ -111,31 +124,42 @@
   inputField.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
 
   addMessage("Hi! Describe your plumbing issue or upload a photo, and I'll help you book a pro.", 'bot');
-  const retellScript = document.createElement('script');
-  retellScript.src = "https://cdn.jsdelivr.net/npm/retell-client-javascript-sdk@2.0.0/dist/index.js"; 
-  document.head.appendChild(retellScript);
-
+  // --- UPGRADED RETELL AI VOICE LOGIC ---
+  
   const callButton = document.getElementById('ai-call-btn');
   let retellWebClient = null;
 
-  retellScript.onload = () => {
-    // Initialize the client once the script loads
-    retellWebClient = new RetellWebClient();
-    
-    retellWebClient.on("call_started", () => console.log("Audio stream active!"));
-    retellWebClient.on("call_ended", () => endVoiceCall());
-  };
+  // Use dynamic ES Module import (Points to the jsdelivr CDN you already whitelisted!)
+  import('https://esm.sh/retell-client-js-sdk')
+    .then((module) => {
+      console.log("✅ Retell SDK loaded successfully!");
+      retellWebClient = new module.RetellWebClient();
+      
+      retellWebClient.on("call_started", () => console.log("🎙️ Audio stream active!"));
+      retellWebClient.on("call_ended", () => endVoiceCall());
+    })
+    .catch((error) => {
+      console.error("❌ Failed to download Retell SDK:", error);
+    });
 
   async function startVoiceCall() {
-    if (!retellWebClient) return;
+    console.log("📞 Call button was clicked!"); // Debug log
+
+    if (!retellWebClient) {
+      console.error("Cannot start call: retellWebClient is still null.");
+      alert("The audio system is still loading or was blocked. Check the console!");
+      return;
+    }
     
     try {
       callButton.innerText = "Connecting...";
       callButton.disabled = true;
 
-      let sessionId = localStorage.getItem('chatSessionId') || "new-session";
+      let sessionId = localStorage.getItem('chatSessionId');
 
-      // 1. Ask your backend for the access token using the dynamic URL
+      console.log(`Asking backend for token at: ${BACKEND_URL}/api/v1/voice/create-web-call`);
+
+      // 1. Ask your backend for the access token
       const response = await fetch(`${BACKEND_URL}/api/v1/voice/create-web-call`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -145,9 +169,14 @@
         })
       });
       
-      if (!response.ok) throw new Error("Failed to get token");
+      if (!response.ok) {
+        const errData = await response.text();
+        throw new Error(`Backend rejected token request: ${errData}`);
+      }
+      
       const data = await response.json();
-
+      console.log("✅ Token received from backend!");
+      isCallActive = true;
       // 2. Pass token to Retell
       await retellWebClient.startCall({
         accessToken: data.accessToken,
@@ -155,24 +184,62 @@
 
       callButton.innerText = "🛑 End Call";
       callButton.disabled = false;
-      callButton.onclick = endVoiceCall; 
 
     } catch (error) {
-      console.error("Failed to start call:", error);
+      console.error("❌ Call initialization failed:", error);
       callButton.innerText = "Call Failed";
       setTimeout(() => {
         callButton.innerText = "📞 Call Support";
         callButton.disabled = false;
-        callButton.onclick = startVoiceCall;
       }, 3000);
     }
   }
 
-  function endVoiceCall() {
-    if (retellWebClient) retellWebClient.stopCall();
-    callButton.innerText = "📞 Call Support";
-    callButton.onclick = startVoiceCall; 
-  }
+  let isCallActive = false; // Add this variable above the function
 
-  callButton.addEventListener('click', startVoiceCall);
+  function endVoiceCall() {
+    if (!isCallActive) return; // Prevent infinite loops!
+    
+    console.log("🛑 Ending call...");
+    isCallActive = false;
+    
+    if (retellWebClient) {
+      retellWebClient.stopCall();
+    }
+    
+    callButton.innerText = "📞 Call Support";
+    callButton.disabled = false;    
+    // Trigger chat sync so the booking ID appears on the screen!
+    syncChatHistory(); 
+  }
+  async function syncChatHistory() {
+    try {
+      const sessionId = localStorage.getItem('chatSessionId');
+      const response = await fetch(`${BACKEND_URL}/api/v1/chat/history?sessionId=${sessionId}`);
+      
+      if (response.ok) {
+        const data = await response.json();
+        
+        // Clear the visual chat box
+        messagesContainer.innerHTML = '';
+        
+        // Re-render everything from the database
+        data.history.forEach(msg => {
+          if (msg.role !== 'system') {
+            const sender = msg.role === 'user' ? 'user' : 'bot';
+            addMessage(msg.content, sender);
+          }
+        });
+      }
+    } catch (error) {
+      console.log("Could not sync chat history visually.");
+    }
+  }
+  callButton.onclick = () => {
+    if (isCallActive) {
+      endVoiceCall();
+    } else {
+      startVoiceCall();
+    }
+  };
 })();

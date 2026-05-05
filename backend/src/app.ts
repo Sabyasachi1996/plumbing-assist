@@ -8,7 +8,30 @@ import { voiceController } from "./controllers/v1/voice.controller.js";
 const app = express();
 
 // Security and utility middlewares
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        "script-src": [
+          "'self'", 
+          "'unsafe-inline'", 
+          "https://esm.sh",
+          "https://moltenly-undeflective-carol.ngrok-free.dev" // <-- ADD YOUR NGROK URL HERE
+        ], 
+        "connect-src": [
+          "'self'", 
+          "wss://api.retellai.com", 
+          "https://api.retellai.com", 
+          "https://*.livekit.cloud", 
+          "wss://*.livekit.cloud",
+          "https://esm.sh",
+          "https://moltenly-undeflective-carol.ngrok-free.dev"
+        ] 
+      },
+    },
+  })
+);
 app.use(cors({
   origin: [
     "http://localhost:5173", // Your local Vite frontend
@@ -31,7 +54,7 @@ const wss = new WebSocketServer({server})
 wss.on('connection', (ws, req) => {
   if (req.url?.startsWith('/api/v1/voice/stream')) {
     console.log('🎙️ Retell AI connected to WebSocket!');
-    voiceController.handleStream(ws);
+    voiceController.handleStream(ws,req);
     // We will pass this to our new voice controller shortly
   } else {
     ws.close();
