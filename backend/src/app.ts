@@ -2,14 +2,17 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import v1Routes from "./routes/v1/index.js";
+import v2Routes from "./routes/v2/index.js";
 import { createServer } from "http";
 import {WebSocketServer} from "ws";
 import { voiceController } from "./controllers/v1/voice.controller.js";
+import { widgetController } from "./controllers/v2/widget.controller.js";
 const app = express();
 
 // Security and utility middlewares
 app.use(
   helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
     contentSecurityPolicy: {
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
@@ -49,6 +52,7 @@ app.get("/health", (req, res) => {
 });
 // Register the API Routes
 app.use("/api/v1", v1Routes);
+app.use("/api/v2", v2Routes);
 const server = createServer(app);
 const wss = new WebSocketServer({server})
 wss.on('connection', (ws, req) => {
@@ -56,7 +60,10 @@ wss.on('connection', (ws, req) => {
     console.log('🎙️ Retell AI connected to WebSocket!');
     voiceController.handleStream(ws,req);
     // We will pass this to our new voice controller shortly
-  } else {
+  }else if (req.url?.startsWith('/api/v2/widget/ws')) {
+    widgetController.handleClientStream(ws, req);
+  } 
+  else {
     ws.close();
   }
 });

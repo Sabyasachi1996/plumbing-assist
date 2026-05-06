@@ -37,3 +37,77 @@ model Appointment {
   
   createdAt        DateTime @default(now())
 }
+// This enum cleanly separates the temporary users from the paying users
+enum OrgStatus {
+  SANDBOX
+  REGISTERED
+}
+
+// 1. NEW TABLE: Manages the Business Type dropdown
+model BusinessType {
+  id            String         @id @default(uuid())
+  name          String         @unique // e.g., "Plumbing", "HVAC"
+  
+  // Relationship back to organizations
+  organizations Organization[] 
+  
+  createdAt     DateTime       @default(now())
+}
+
+// 2. V2 ORGANIZATION TABLE (Replaces the old 'Company' model)
+model Organization {
+  id                  String       @id @default(uuid())
+  
+  // Initial Form Data
+  name                String
+  description         String?
+  logoUrl             String?
+  businessUrl         String?
+  
+  // Split the hours for cleaner calendar math
+  startTime           String       // e.g., "08:00"
+  endTime             String       // e.g., "18:00"
+  visitFee            Float?       // The estimated price for the AI to quote
+  
+  // Relationship to BusinessType
+  businessTypeId      String
+  businessType        BusinessType @relation(fields: [businessTypeId], references: [id])
+  
+  // Contact Info (Required to fetch their sandbox data later)
+  email               String?      @unique
+  phone               String?      @unique
+  
+  // Status & Expiration (The Separation Logic)
+  status              OrgStatus    @default(SANDBOX)
+  sandboxExpiresAt    DateTime?    // Set to 15 mins after creation; Null when REGISTERED
+  
+  // Registration Completion Fields
+  calendarProvider      String?    // e.g., "google" or "microsoft"
+  calendarRefreshToken  String?
+  paymentUrl          String?
+
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  bookings            Booking[]
+}
+
+// 3. V2 BOOKING TABLE (Replaces the old 'Appointment' model)
+model Booking {
+  id                  String       @id @default(uuid())
+  
+  // Link to the Organization
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id])
+  
+  customerName        String
+  customerEmail       String?
+  customerPhone       String
+  issueDescription    String
+  issueSeverity       String?      // e.g., "Urgent" or "Routine" based on AI Vision
+  
+  appointmentTime     DateTime     // The start time of the 2-hour window
+  trackingToken       String       @unique
+
+  createdAt           DateTime     @default(now())
+}

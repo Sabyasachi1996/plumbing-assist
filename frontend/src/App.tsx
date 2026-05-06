@@ -1,15 +1,19 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import Auth from './pages/Auth';
-import Dashboard from './pages/Dashboard';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import LandingForm from './pages/LandingForm';
+import DemoSandbox from './pages/DemoSandbox';
+import FinalizeRegistration from './pages/FinalizeRegistration';
+import type { JSX } from 'react';
 
-export default function App() {
-  const isAuthenticated = !!localStorage.getItem('companyId');
+// Explicitly type the URL string
+export const API_BASE_URL: string = "https://moltenly-undeflective-carol.ngrok-free.dev";
 
+export default function App(): JSX.Element {
   return (
     <Router>
       <Routes>
-        <Route path="/login" element={!isAuthenticated ? <Auth /> : <Navigate to="/" />} />
-        <Route path="/" element={isAuthenticated ? <Dashboard /> : <Navigate to="/login" />} />
+        <Route path="/" element={<LandingForm />} />
+        <Route path="/demo" element={<DemoSandbox />} />
+        <Route path="/register" element={<FinalizeRegistration />} />
       </Routes>
     </Router>
   );

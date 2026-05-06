@@ -1,9 +1,6 @@
 import Groq from "groq-sdk";
 import { env } from "../config/env.js";
 import { calendarService } from "./calendar.service.js";
-import { mockCalendarService } from "./v2/mockCalendar.service.js";
-import { db } from "../db/index.js";
-import { widgetController } from "../controllers/v2/widget.controller.js";
 
 // Initialize the Groq SDK
 const groq = new Groq({ apiKey: env.GROQ_API_KEY });
@@ -47,14 +44,6 @@ const tools: any[] = [
         required: ["customerName", "customerEmail", "customerPhone", "issueDescription", "startIsoString"],
       },
     },
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "requestImageUpload",
-      "description": "Call this tool immediately when you want the user to upload a photo of their plumbing issue.",
-      "parameters": { "type": "object", "properties": {} }
-    }
   }
 ];
 
@@ -84,7 +73,7 @@ export const aiService = {
     }
   },
   // Notice we added retryCount = 0 here
-  async generateResponse(messages: any[], companyId: string, sessionId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[] }> {
+  async generateResponse(messages: any[], companyId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[] }> {
     try {
       const response = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
@@ -100,57 +89,27 @@ export const aiService = {
       messages.push(responseMessage);
 
       if (toolCalls && toolCalls.length > 0) {
-        // 1. FETCH ORGANIZATION STATUS ONCE
-        const organization = await db.organization.findUnique({
-          where: { id: companyId },
-          select: { status: true }
-        });
-        const isSandbox = organization?.status === "SANDBOX";
-
-        for(const toolCall of toolCalls){
+        for (const toolCall of toolCalls) {
           const functionName = toolCall.function.name;
           const functionArgs = JSON.parse(toolCall.function.arguments);
           let functionResult: any;
-          console.log(`🤖 AI is triggering tool: ${functionName} (Sandbox Mode: ${isSandbox})`);
-          // 2. THE ROUTER: Send to Mock or Real Service based on Status
-          if (functionName === "requestImageUpload") {
-            widgetController.sendSignal(sessionId, { action: "TRIGGER_IMAGE_UPLOAD" });
-            functionResult = { success: true, message: "Image upload UI opened. Ask them to wait for the analysis." };
-          }else if (functionName === "checkCalendarAvailability") {
-            functionResult = isSandbox
-            ? await mockCalendarService.checkAvailability(companyId, functionArgs.dateIsoString)
-            : await calendarService.checkAvailability(companyId, functionArgs.dateIsoString);            
-            // 🔥 FIX: Fire the Slot Picker Signal!
-            widgetController.sendSignal(sessionId, { 
-              action: "SHOW_SLOT_PICKER", 
-              data: { slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } // Hardcoded for demo visualization
-            });
-          }else if (functionName === "bookAppointment") {
-            const bookingArgs = {
+
+          console.log(`🤖 AI is triggering tool: ${functionName}`);
+
+          if (functionName === "checkCalendarAvailability") {
+            functionResult = await calendarService.checkAvailability(companyId, functionArgs.dateIsoString);
+          } 
+          else if (functionName === "bookAppointment") {
+             functionResult = await calendarService.bookAppointment({
               companyId,
               customerName: functionArgs.customerName,
               customerEmail: functionArgs.customerEmail,
               customerPhone: functionArgs.customerPhone,
               issueDescription: functionArgs.issueDescription,
               startIsoString: functionArgs.startIsoString,
-            };
-            const rawResult: any = isSandbox
-            ? await mockCalendarService.bookAppointment(bookingArgs)
-            : await calendarService.bookAppointment(bookingArgs);
-            //Define the token so both the UI and AI get the exact same string
-            const actualToken = rawResult?.trackingToken || "DEMO_TOKEN";
-            // Fire the Payment Modal Signal
-            widgetController.sendSignal(sessionId, { 
-              action: "SHOW_PAYMENT_MODAL", 
-              data: { amount: 70, trackingToken: actualToken } 
             });
-            // Override what the AI sees
-            functionResult = {
-              status: "PAYMENT_PENDING",
-              trackingToken: actualToken, // <-- AI now memorizes "DEMO_TOKEN"
-              SYSTEM_INSTRUCTION: "CRITICAL: The payment modal is now on the user's screen. DO NOT say the appointment is booked. Tell the user: 'I have reserved your slot. Please complete the advance payment on your screen.' You MUST wait for them to say payment is complete before giving them the tracking token."
-            };
           }
+
           messages.push({
             tool_call_id: toolCall.id,
             role: "tool",
@@ -158,34 +117,43 @@ export const aiService = {
             content: JSON.stringify(functionResult),
           });
         }
+
         const secondResponse = await groq.chat.completions.create({
           model: "llama-3.3-70b-versatile",
           messages: messages,
         });
+
         messages.push(secondResponse.choices[0].message);
+
         return { 
           reply: secondResponse.choices[0].message.content ?? "",
           updatedMessages: messages
         };
       }
+
       return { 
         reply: responseMessage.content ?? "",
         updatedMessages: messages
       };
-    }catch(error: any){
+
+    } catch (error: any) {
       // --- THE BULLETPROOF RECOVERY BLOCK ---
-      const groqError = error?.error?.error || error?.error;      
+      const groqError = error?.error?.error || error?.error;
+      
       // If Groq throws the syntax error AND we haven't retried too many times
       if (groqError?.code === "tool_use_failed" && retryCount < 2) {
-        console.log(`⚠️ AI Syntax Error caught! Retrying silently... (Attempt ${retryCount + 1})`);        
+        console.log(`⚠️ AI Syntax Error caught! Retrying silently... (Attempt ${retryCount + 1})`);
+        
         // Inject a strict warning into the AI's memory
         messages.push({
           role: "system",
           content: "SYSTEM ERROR: Your previous tool call failed due to malformed syntax. DO NOT output raw <function> tags. DO NOT output conversational text. Output ONLY the strict JSON required to trigger the tool."
         });
+
         // Recursively call the function again!
-        return this.generateResponse(messages, companyId, sessionId, retryCount + 1);
+        return this.generateResponse(messages, companyId, retryCount + 1);
       }
+
       // If it's a different error or we ran out of retries, throw it
       console.error("Groq AI Service Error:", error);
       throw new Error("Failed to generate AI response.");

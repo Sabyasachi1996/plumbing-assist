@@ -54,11 +54,15 @@ export const chatController = {
       Step 2. Once the issue is understood, ASK the user what date they want the plumber to come. (DO NOT guess the date. WAIT for their response).
       Step 3. ONLY AFTER the user explicitly provides a date, use the 'checkCalendarAvailability' tool.
       Step 4. Present the open slots to the user.
-      Step 5. Once they pick a slot, ask for their Full Name, Email, and Phone Number.
-      Step 6. Once you have all details, use the 'bookAppointment' tool.
+      Step 5. Once they pick a slot, ask for their Full Name, Email, and Phone Number. (DO NOT book yet).
+      Step 6. ONLY AFTER the user has explicitly provided ALL THREE details (Name, Email, AND Phone Number), use the 'bookAppointment' tool. Never hallucinate missing details.
+
+      VISION CAPABILITY RULES:
+      - If the user says they want to show you a photo, upload an image, or share a picture, YOU MUST enthusiastically say: "Great, please upload the image using the camera icon in our chat window and I will take a look right now!"
+      - NEVER say you cannot see images. You CAN see images if they upload them to the chat window.
 
       STRICT RULES:
-      - TIMEZONE RULE: When generating date parameters for tools, ALWAYS append the IST offset (+05:30). Example format: YYYY-MM-DDThh:mm:00+05:30. NEVER use 'Z' or UTC.
+      - TIMEZONE RULE: When generating date parameters for tools, pass the EXACT local Indian Standard Time (IST) requested by the user. Use the exact format: YYYY-MM-DDTHH:mm:00 (e.g., 2026-05-08T16:00:00). DO NOT convert to UTC. DO NOT append 'Z' or any timezone offset like '+05:30'.
       - NEVER assume or hallucinate a date. You must ask.
       - NEVER output raw function tags (like <function>) in your conversational text. If you need a tool, trigger it natively in the background.
       - Take the conversation exactly one step at a time.
@@ -71,7 +75,7 @@ export const chatController = {
       chatHistory.push({ role: "user", content: finalUserMessage });
 
       // 6. Send the entire array to Groq
-      const { reply, updatedMessages } = await aiService.generateResponse(chatHistory, companyId);
+      const { reply, updatedMessages } = await aiService.generateResponse(chatHistory, companyId, sessionId);
 
       // 7. Save the updated array back to Redis (it will save the system prompt, but we filter it out next time)
       await redisService.saveSessionHistory(sessionId, updatedMessages);
