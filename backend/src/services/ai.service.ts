@@ -4,6 +4,8 @@ import { calendarService } from "./calendar.service.js";
 import { mockCalendarService } from "./v2/mockCalendar.service.js";
 import { db } from "../db/index.js";
 import { widgetController } from "../controllers/v2/widget.controller.js";
+import { logger } from "../utils/logger.js";
+import { AppError } from "../utils/AppError.js";
 
 // Initialize the Groq SDK
 const groq = new Groq({ apiKey: env.GROQ_API_KEY });
@@ -62,7 +64,7 @@ export const aiService = {
   // NEW VISION FUNCTION
   async analyzeImage(base64Image: string, mimeType: string): Promise<string> {
     try {
-      console.log("👀 AI is analyzing the uploaded image...");
+      logger.info("AI is analyzing image...");
       const response = await groq.chat.completions.create({
         model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: [
@@ -79,12 +81,12 @@ export const aiService = {
 
       return response.choices[0].message.content || "I see an image, but I can't determine the exact plumbing issue.";
     } catch (error) {
-      console.error("Vision API Error:", error);
+      logger.error("Vision API Error:", error);
       return "The user uploaded an image, but I encountered an error analyzing it.";
     }
   },
   // Notice we added retryCount = 0 here
-  async generateResponse(messages: any[], companyId: string, sessionId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[] }> {
+  async generateResponse(messages: any[], companyId: string, sessionId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[],pendingSignals: any[] }> {
     try {
       const response = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
@@ -98,7 +100,7 @@ export const aiService = {
       const toolCalls = responseMessage.tool_calls;
 
       messages.push(responseMessage);
-
+      let pendingSignals: any[] = [];
       if (toolCalls && toolCalls.length > 0) {
         // 1. FETCH ORGANIZATION STATUS ONCE
         const organization = await db.organization.findUnique({
@@ -111,20 +113,25 @@ export const aiService = {
           const functionName = toolCall.function.name;
           const functionArgs = JSON.parse(toolCall.function.arguments);
           let functionResult: any;
-          console.log(`🤖 AI is triggering tool: ${functionName} (Sandbox Mode: ${isSandbox})`);
+          logger.info(`🤖 AI is triggering tool: ${functionName} (Sandbox Mode: ${isSandbox})`);
           // 2. THE ROUTER: Send to Mock or Real Service based on Status
           if (functionName === "requestImageUpload") {
-            widgetController.sendSignal(sessionId, { action: "TRIGGER_IMAGE_UPLOAD" });
+            pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+            // widgetController.sendSignal(sessionId, { action: "TRIGGER_IMAGE_UPLOAD" });
             functionResult = { success: true, message: "Image upload UI opened. Ask them to wait for the analysis." };
           }else if (functionName === "checkCalendarAvailability") {
             functionResult = isSandbox
             ? await mockCalendarService.checkAvailability(companyId, functionArgs.dateIsoString)
-            : await calendarService.checkAvailability(companyId, functionArgs.dateIsoString);            
+            : await calendarService.checkAvailability(companyId, functionArgs.dateIsoString); 
+            pendingSignals.push({ 
+              action: "SHOW_SLOT_PICKER", 
+              data: { slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] }
+            });           
             // 🔥 FIX: Fire the Slot Picker Signal!
-            widgetController.sendSignal(sessionId, { 
+            /* widgetController.sendSignal(sessionId, { 
               action: "SHOW_SLOT_PICKER", 
               data: { slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } // Hardcoded for demo visualization
-            });
+            }); */
           }else if (functionName === "bookAppointment") {
             const bookingArgs = {
               companyId,
@@ -139,11 +146,15 @@ export const aiService = {
             : await calendarService.bookAppointment(bookingArgs);
             //Define the token so both the UI and AI get the exact same string
             const actualToken = rawResult?.trackingToken || "DEMO_TOKEN";
-            // Fire the Payment Modal Signal
-            widgetController.sendSignal(sessionId, { 
+            pendingSignals.push({ 
               action: "SHOW_PAYMENT_MODAL", 
               data: { amount: 70, trackingToken: actualToken } 
             });
+            // Fire the Payment Modal Signal
+            /* widgetController.sendSignal(sessionId, { 
+              action: "SHOW_PAYMENT_MODAL", 
+              data: { amount: 70, trackingToken: actualToken } 
+            }); */
             // Override what the AI sees
             functionResult = {
               status: "PAYMENT_PENDING",
@@ -165,19 +176,21 @@ export const aiService = {
         messages.push(secondResponse.choices[0].message);
         return { 
           reply: secondResponse.choices[0].message.content ?? "",
-          updatedMessages: messages
+          updatedMessages: messages,
+          pendingSignals
         };
       }
       return { 
         reply: responseMessage.content ?? "",
-        updatedMessages: messages
+        updatedMessages: messages,
+        pendingSignals
       };
     }catch(error: any){
       // --- THE BULLETPROOF RECOVERY BLOCK ---
       const groqError = error?.error?.error || error?.error;      
       // If Groq throws the syntax error AND we haven't retried too many times
       if (groqError?.code === "tool_use_failed" && retryCount < 2) {
-        console.log(`⚠️ AI Syntax Error caught! Retrying silently... (Attempt ${retryCount + 1})`);        
+        logger.warn(`⚠️ AI Syntax Error caught! Retrying silently... (Attempt ${retryCount + 1})`);        
         // Inject a strict warning into the AI's memory
         messages.push({
           role: "system",
@@ -187,8 +200,8 @@ export const aiService = {
         return this.generateResponse(messages, companyId, sessionId, retryCount + 1);
       }
       // If it's a different error or we ran out of retries, throw it
-      console.error("Groq AI Service Error:", error);
-      throw new Error("Failed to generate AI response.");
+      logger.error("Groq AI Service Error:", error);
+      throw new AppError("Failed to generate AI response.",502);
     }
   }
 };

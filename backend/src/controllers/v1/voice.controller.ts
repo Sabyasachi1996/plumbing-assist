@@ -5,6 +5,9 @@ import Retell from "retell-sdk";
 import { env } from '../../config/env.js';
 import { Request, Response } from 'express';
 import { IncomingMessage } from 'http';
+import { AppError } from '../../utils/AppError.js';
+import { asyncHandler } from '../../utils/asyncHandler.js';
+import { widgetController } from '../v2/widget.controller.js';
 
 // We ONLY use this Map to push unsolicited text-to-speech interruptions (like Image Uploads) to the active socket[cite: 5].
 // We DO NOT use it for storing database variables anymore.
@@ -16,34 +19,30 @@ const retellClient = new Retell({
 });
 
 export const voiceController = {
-  async createWebCall(req: Request, res: Response): Promise<void> {
-    try {
-      // In a real app, agentId comes from the Company database record[cite: 5]. 
-      // For now, hardcode the Agent ID you got from the Retell Dashboard[cite: 5].
-      const agentId = "agent_c5710c68d65c2f85add46c5cee"; 
-      const { sessionId, companyId } = req.body;
+  createWebCall: asyncHandler(async (req: Request, res: Response) => {
+    const agentId = "agent_c5710c68d65c2f85add46c5cee"; 
+    const { sessionId, companyId } = req.body;
 
-      // Ask Retell to prepare a web call
-      const webCallResponse = await retellClient.call.createWebCall({
-        agent_id: agentId,
-      });
-
-      // 🔒 STORE SECURELY IN REDIS
-      // We map Retell's unique call_id directly to your user's specific Session and Company.
-      const safeCompanyId = companyId && companyId.trim() !== "" ? companyId : "123e4567-e89b-12d3-a456-426614174000";
-      
-      await redisService.saveCallVariables(webCallResponse.call_id, {
-        sessionId: sessionId || `session_${Date.now()}`,
-        companyId: safeCompanyId
-      });
-
-      // Send the secure token to the React/Vanilla JS widget[cite: 5]
-      res.status(200).json({ accessToken: webCallResponse.access_token });
-    } catch (error) {
-      console.error("Error creating web call:", error);
-      res.status(500).json({ error: "Failed to initialize call" });
+    if (!sessionId || !companyId) {
+      throw new AppError("Session ID and Company ID are required.", 400);
     }
-  },  
+    // Ask Retell to prepare a web call
+    const webCallResponse = await retellClient.call.createWebCall({
+      agent_id: agentId,
+    });
+    if (!webCallResponse || !webCallResponse.call_id) {
+      throw new AppError("Failed to initialize call with Retell AI.", 502); // 502 Bad Gateway
+    }
+
+    const safeCompanyId = companyId && companyId.trim() !== "" ? companyId : "123e4567-e89b-12d3-a456-426614174000";
+    
+    await redisService.saveCallVariables(webCallResponse.call_id, {
+      sessionId: sessionId,
+      companyId: safeCompanyId
+    });
+
+    res.status(200).json({ accessToken: webCallResponse.access_token });
+  }),  
   
   // UPDATE: Make sure to add `req: Request` to the function parameters!
   handleStream(ws: WebSocket, req: IncomingMessage) {
@@ -131,6 +130,9 @@ export const voiceController = {
           // Feed to Groq & Save
           const aiResponse = await aiService.generateResponse(chatHistory, companyId, sessionId);
           await redisService.saveSessionHistory(sessionId, aiResponse.updatedMessages);
+          aiResponse.pendingSignals.forEach((signal: any) => {
+             widgetController.sendSignal(sessionId, signal);
+          });
           const replyText = aiResponse.reply.toLowerCase();
           const shouldHangUp = replyText.includes("goodbye") || replyText.includes("have a great day");
           const spokenContent = aiResponse.reply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();

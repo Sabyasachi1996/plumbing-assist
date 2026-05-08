@@ -1,11 +1,12 @@
 import crypto from "crypto";
+import { logger } from "../../utils/logger.js"; 
 
 export const mockCalendarService = {
   
   // MOCK TOOL 1: Always returns the standard business hours
   async checkAvailability(companyId: string, dateIsoString: string) {
     try {
-      console.log(`[SANDBOX] Mocking availability check for Date: ${dateIsoString}`);
+      logger.info(`[SANDBOX] Mocking availability check for Date: ${dateIsoString}`);
       
       // Simulate standard available slots
       const formattedSlots = ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"];
@@ -15,6 +16,7 @@ export const mockCalendarService = {
         message: `Available slots for this date: ${formattedSlots.join(", ")}` 
       };
     } catch (error) {
+      logger.error("Mock calendar check failed:", error);
       return { success: false, message: "Mock calendar check failed." };
     }
   },
@@ -29,7 +31,7 @@ export const mockCalendarService = {
     startIsoString: string 
   }) {
     try {
-      console.log(`[SANDBOX] Mocking appointment booking for: ${args.customerName}`);
+      logger.info(`[SANDBOX] Mocking appointment booking for: ${args.customerName}`);
 
       // Generate a fake tracking token
       const token = crypto.randomBytes(4).toString("hex").toUpperCase();
@@ -40,6 +42,7 @@ export const mockCalendarService = {
         message: `Successfully booked! Event ID: ${fakeEventId}. Please give the customer this Tracking Token: ${token}` 
       };
     } catch (error) {
+      logger.error("Mock appointment booking failed:", error);
       return { success: false, message: "Mock appointment booking failed." };
     }
   }

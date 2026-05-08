@@ -7,8 +7,19 @@ import { createServer } from "http";
 import {WebSocketServer} from "ws";
 import { voiceController } from "./controllers/v1/voice.controller.js";
 import { widgetController } from "./controllers/v2/widget.controller.js";
+import { logger } from "./utils/logger.js";
+import morgan from "morgan";
+import { errorHandler } from "./middlewares/error.middleware.js";
 const app = express();
-
+// Morgan request logging and attaching it with winston
+const morganFormat = process.env.NODE_ENV === "production" ? "combined" : "dev";
+app.use(
+  morgan(morganFormat, {
+    stream: {
+      write: (message) => logger.info(message.trim()),
+    },
+  })
+);
 // Security and utility middlewares
 app.use(
   helmet({
@@ -35,13 +46,16 @@ app.use(
     },
   })
 );
+//TODO: need to fix the cors for production grade later. currently open for local testing
 app.use(cors({
-  origin: [
-    "http://localhost:5173", // Your local Vite frontend
-    // "https://your-future-client-website.com" <-- You will add real domains here later
-  ],
-  methods: ["GET", "POST", "OPTIONS"],
-  credentials: true, // Required if we ever add cookies or strict auth tokens
+  origin: true,
+  credentials: true,
+  // origin: [
+  //   "*", // Your local Vite frontend
+  //   // "https://your-future-client-website.com" <-- You will add real domains here later
+  // ],
+  // methods: ["GET", "POST", "OPTIONS"],
+  // credentials: true, // Required if we ever add cookies or strict auth tokens
 }));
 app.use(express.json());
 app.use(express.static('public'));
@@ -53,6 +67,7 @@ app.get("/health", (req, res) => {
 // Register the API Routes
 app.use("/api/v1", v1Routes);
 app.use("/api/v2", v2Routes);
+app.use(errorHandler);
 const server = createServer(app);
 const wss = new WebSocketServer({server})
 wss.on('connection', (ws, req) => {
