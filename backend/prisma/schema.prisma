@@ -65,8 +65,8 @@ model Organization {
   businessUrl         String?
   
   // Split the hours for cleaner calendar math
-  startTime           String       // e.g., "08:00"
-  endTime             String       // e.g., "18:00"
+  startTime           String?       // e.g., "08:00"
+  endTime             String?       // e.g., "18:00"
   visitFee            Float?       // The estimated price for the AI to quote
   
   // Relationship to BusinessType

@@ -7,8 +7,8 @@ import {businessTypeRepository} from "../../repositories/businessType.repository
 export const organizationController = {
   
   createSandbox: asyncHandler(async (req: Request, res: Response) => {
-    const { name, businessTypeId, description, logoUrl, businessUrl, startTime, endTime, visitFee, email, phone } = req.body;
-
+    const { name, businessTypeId, description,email, phone } = req.body;
+    // , logoUrl, businessUrl, startTime, endTime, visitFee, 
     // 1. Check if organization already exists using the repository
     const existingOrg = await organizationRepository.findByEmailOrPhone(email, phone);
 
@@ -22,15 +22,20 @@ export const organizationController = {
     // 2. Upsert using repository
     if (existingOrg) {
       organization = await organizationRepository.updateOrganization(existingOrg.id, {
-        name, businessTypeId, description, logoUrl, businessUrl, startTime, endTime, 
-        visitFee: visitFee ? parseFloat(visitFee) : null,
+        name,
+        businessTypeId,
+        description,
         sandboxExpiresAt: expiresAt,
       });
     } else {
       organization = await organizationRepository.createSandbox({
-        name, businessTypeId, description, logoUrl, businessUrl, startTime, endTime, 
-        visitFee: visitFee ? parseFloat(visitFee) : null,
-        email, phone, status: "SANDBOX", sandboxExpiresAt: expiresAt,
+        name,
+        businessTypeId,
+        description,
+        email,
+        phone,
+        status: "SANDBOX",
+        sandboxExpiresAt: expiresAt
       });
     }
 

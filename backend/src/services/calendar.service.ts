@@ -99,7 +99,11 @@ export const calendarService = {
         trackingToken: token,
       });
 
-      return { success: true, message: `Successfully booked! Event ID: ${event.data?.id}. Please give the customer this Tracking Token: ${token}` };
+      return { 
+        success: true, 
+        message: `Successfully booked! Event ID: ${event.data?.id}. Please give the customer this Tracking Token: ${token}`,
+        trackingToken: token // <-- Added this!
+      };
 
     } catch (error) {
       logger.error("Calendar Booking Error:", error);

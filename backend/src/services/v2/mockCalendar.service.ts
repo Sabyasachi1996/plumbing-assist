@@ -39,7 +39,8 @@ export const mockCalendarService = {
 
       return { 
         success: true, 
-        message: `Successfully booked! Event ID: ${fakeEventId}. Please give the customer this Tracking Token: ${token}` 
+        message: `Successfully booked! Event ID: ${fakeEventId}. Please give the customer this Tracking Token: ${token}`,
+        trackingToken: token // <-- Added this!
       };
     } catch (error) {
       logger.error("Mock appointment booking failed:", error);

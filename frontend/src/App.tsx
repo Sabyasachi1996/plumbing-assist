@@ -1,20 +1,54 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import LandingForm from './pages/LandingForm';
-import DemoSandbox from './pages/DemoSandbox';
-import FinalizeRegistration from './pages/FinalizeRegistration';
-import type { JSX } from 'react';
+import { useState } from 'react';
+import LandingPage from './components/LandingPage';
+import SandboxForm from './components/SandboxForm';
+import Playground from './components/Playground';
 
-// Explicitly type the URL string
-export const API_BASE_URL: string = "https://moltenly-undeflective-carol.ngrok-free.dev";
+export type AppState = 'LANDING' | 'REGISTER' | 'PLAYGROUND';
 
-export default function App(): JSX.Element {
+export interface OrganizationData {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  businessTypeId: string;
+}
+
+function App() {
+  const [currentView, setCurrentView] = useState<AppState>('LANDING');
+  const [orgData, setOrgData] = useState<OrganizationData | null>(null);
+  const [sessionId, setSessionId] = useState<string>('');
+
+  const navigateTo = (view: AppState) => setCurrentView(view);
+
+  const handleSandboxCreated = (data: OrganizationData, newSessionId: string) => {
+    setOrgData(data);
+    setSessionId(newSessionId);
+    setCurrentView('PLAYGROUND');
+  };
+
   return (
-    <Router>
-      <Routes>
-        <Route path="/" element={<LandingForm />} />
-        <Route path="/demo" element={<DemoSandbox />} />
-        <Route path="/register" element={<FinalizeRegistration />} />
-      </Routes>
-    </Router>
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-200">
+      {currentView === 'LANDING' && <LandingPage onGetStarted={() => navigateTo('REGISTER')} />}
+      
+      {currentView === 'REGISTER' && (
+        <SandboxForm 
+          onBack={() => navigateTo('LANDING')} 
+          onSuccess={handleSandboxCreated} 
+        />
+      )}
+      
+      {currentView === 'PLAYGROUND' && orgData && (
+        <Playground 
+          orgData={orgData} 
+          sessionId={sessionId} 
+          onReset={() => {
+            setOrgData(null);
+            setCurrentView('LANDING');
+          }} 
+        />
+      )}
+    </div>
   );
 }
+
+export default App;

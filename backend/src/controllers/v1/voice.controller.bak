@@ -1,0 +1,208 @@
+import { WebSocket } from 'ws';
+import { aiService } from '../../services/ai.service.js';
+import { redisService } from '../../services/redis.service.js';
+import Retell from "retell-sdk";
+import { env } from '../../config/env.js';
+import { Request, Response } from 'express';
+import { IncomingMessage } from 'http';
+import { AppError } from '../../utils/AppError.js';
+import { asyncHandler } from '../../utils/asyncHandler.js';
+import { widgetController } from '../v2/widget.controller.js';
+
+// We ONLY use this Map to push unsolicited text-to-speech interruptions (like Image Uploads) to the active socket[cite: 5].
+// We DO NOT use it for storing database variables anymore.
+// Replace your current activeCalls line with this:
+export const activeCalls = new Map<string, { ws: WebSocket, getResponseId: () => number }>();
+
+const retellClient = new Retell({
+    apiKey: env.RETELL_API_KEY
+});
+
+export const voiceController = {
+  createWebCall: asyncHandler(async (req: Request, res: Response) => {
+    const agentId = "agent_fe1fe5390ab304f9fb93615a97";//"agent_c5710c68d65c2f85add46c5cee"; 
+    const { sessionId, companyId } = req.body;
+
+    if (!sessionId || !companyId) {
+      throw new AppError("Session ID and Company ID are required.", 400);
+    }
+    // Ask Retell to prepare a web call
+    const webCallResponse = await retellClient.call.createWebCall({
+      agent_id: agentId,
+    });
+    if (!webCallResponse || !webCallResponse.call_id) {
+      throw new AppError("Failed to initialize call with Retell AI.", 502); // 502 Bad Gateway
+    }
+
+    const safeCompanyId = companyId && companyId.trim() !== "" ? companyId : "123e4567-e89b-12d3-a456-426614174000";
+    
+    await redisService.saveCallVariables(webCallResponse.call_id, {
+      sessionId: sessionId,
+      companyId: safeCompanyId
+    });
+
+    res.status(200).json({ accessToken: webCallResponse.access_token });
+  }),  
+  
+  // UPDATE: Make sure to add `req: Request` to the function parameters!
+  handleStream(ws: WebSocket, req: IncomingMessage) {
+    // 1. EXTRACT THE CALL ID DIRECTLY FROM THE URL
+    const url = req.url || "";
+    const urlParts = url.split('/');
+    const callId = urlParts[urlParts.length - 1].split('?')[0];
+
+    let sessionId = '';
+    let companyId = '';
+    let currentResponseId = 0;
+
+    console.log(`🎙️ Retell AI connected for Call: ${callId}`);
+
+    // 2. INSTANT REDIS LOOKUP (Happens before anyone even speaks!)
+    redisService.getCallVariables(callId).then((callVars) => {
+      if (callVars) {
+        sessionId = callVars.sessionId;
+        companyId = callVars.companyId;
+        
+        // Lock the socket in memory for the image upload interruption
+        activeCalls.set(sessionId, {
+            ws: ws,
+            getResponseId: () => currentResponseId
+        });
+        console.log(`[${callId}] Redis Match Found! Synced to Session: ${sessionId}`);
+      } else {
+        console.error(`[${callId}] CRITICAL: No variables found in Redis for this call!`);
+      }
+    }).catch(err => console.error(`[${callId}] Redis Error:`, err));
+
+    // 3. LISTEN FOR USER SPEECH
+    ws.on('message', async (data: Buffer) => {
+      try {
+        const rawString = data.toString();
+        const event = JSON.parse(rawString);
+        if (event.response_id !== undefined) {
+            currentResponseId = event.response_id;
+        }
+        // We completely ignore updates while you are mid-sentence
+        if (event.interaction_type === 'update_only') return;
+
+        // When you stop speaking, we trigger Groq
+        if (event.interaction_type === 'response_required' && sessionId && companyId) {
+          const transcript = event.transcript;
+          if (!transcript || transcript.length === 0) return;
+          
+          const lastUserMessage = transcript[transcript.length - 1].content;
+          console.log(`[${callId}] User said: ${lastUserMessage}`);
+
+          // Fetch History
+          let chatHistory = await redisService.getSessionHistory(sessionId);
+          chatHistory = chatHistory.filter((msg: any) => msg.role !== "system");
+
+          const currentDateTime = new Date().toLocaleString('en-US', { 
+            timeZone: 'Asia/Kolkata',
+            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', hour12: true
+          });
+
+          const systemPrompt = `
+          You are the AI dispatch assistant for a plumbing company. 
+          Current Time: ${currentDateTime}
+
+          STRICT BOUNDARIES & ABUSE PREVENTION:
+          - You ONLY handle plumbing issues and appointments. NEVER answer general knowledge questions.
+          - TWO-STRIKE RULE: If the user is irrelevant TWO TIMES IN A ROW, immediately say: "Since I cannot assist with this, I will hang up now. Have a great day."
+
+          CRITICAL TOOL USAGE RULES (NEVER HALLUCINATE):
+          - You CANNOT see calendars, open forms, or book appointments by yourself. YOU MUST USE YOUR TOOLS.
+          - NEVER invent or simulate available time slots. You MUST call the 'checkCalendarAvailability' tool.
+          - NEVER pretend to collect details. You MUST call the 'requestCustomerDetails' tool.
+          - NEVER confirm a booking without calling the 'bookAppointment' tool.
+          - When you need to use a tool, output the tool call AND STOP. Do not answer on behalf of the tool.
+
+          STATE MACHINE WORKFLOW - Follow strictly step-by-step:
+
+          [STATE 1: ISSUE GATHERING]
+          - Introduce yourself and ask what plumbing issue they are facing.
+          - If the user explicitly says they want to upload an image: trigger the 'requestImageUpload' tool immediately and STOP. Wait for the analysis.
+          - If they describe it verbally, ask: "Would you like to upload a photo of the issue?" 
+             - If YES: trigger the 'requestImageUpload' tool and STOP.
+             - If NO: accept their explanation and move to STATE 2.
+
+          [STATE 2: DATE SELECTION & CALENDAR CHECK]
+          - Ask what date they want the plumber to visit. WAIT for their response.
+          - ONLY AFTER they provide a date, you MUST call the 'checkCalendarAvailability' tool. Use EXACT local IST format (YYYY-MM-DDTHH:mm:00).
+          - DO NOT invent slots. WAIT for the tool to return the real slots.
+
+          [STATE 3: SLOT SELECTION]
+          - Present the open slots returned by the tool and ask them to pick one.
+          - BACKWARD NAVIGATION: The user CAN go back to State 2 to pick a different date.
+
+          [STATE 4: CUSTOMER DETAILS (TOOL CALL REQUIRED)]
+          - Once a slot is picked, you MUST call the 'requestCustomerDetails' tool. 
+          - Tell the user: "I am opening a form on your screen for your details."
+          - STOP AND WAIT. Do not proceed until the user submits the form.
+          - POPUP RECOVERY: If the user says they closed or missed the form, call the 'requestCustomerDetails' tool again.
+
+          [STATE 5: BOOKING & PAYMENT PENDING (CRITICAL LOCK)]
+          - Once you have the details, you MUST call the 'bookAppointment' tool.
+          - The tool will return a tracking token. MEMORIZE THIS TOKEN.
+          - Tell the user: "I have reserved your slot. Please complete the advance payment on your screen."
+          - DO NOT give the tracking token yet. DO NOT confirm the booking.
+          - NAVIGATION LOCK: The user CANNOT go back to previous steps anymore. 
+
+          [STATE 6: PAYMENT VERIFICATION (ZERO TRUST)]
+          - POPUP RECOVERY: If the user says they closed, missed, cannot see the screen, or asks where the payment is, YOU MUST call the 'resendPaymentPopup' tool immediately.
+          - ZERO TRUST RULE: For ALL OTHER replies (especially if they say "done" or "paid"), reply strictly: "Your payment is not completed. Kindly complete that on your screen before proceeding further."
+          - YOU MUST WAIT for a hidden system message that says exactly: "[SYSTEM_PAYMENT_SUCCESSFUL]". 
+          - ONLY when you receive the exact text "[SYSTEM_PAYMENT_SUCCESSFUL]", move to STATE 7.
+
+          [STATE 7: POST-PAYMENT WRAP-UP]
+          - Confirm the appointment and provide the tracking token. 
+          - Ask: "Is there anything else I can help you with?"
+          - IF YES: Provide details again (allow ONLY 1 time), or ask them to start a new session for a new booking.
+          - IF NO: Say "It was a pleasure assisting you. Have a great day!" (Triggering the hang-up).
+          `;
+
+          chatHistory.unshift({ role: "system", content: systemPrompt });
+          chatHistory.push({ role: "user", content: lastUserMessage });
+
+          // Feed to Groq & Save
+          const aiResponse = await aiService.generateResponse(chatHistory, companyId, sessionId);
+          await redisService.saveSessionHistory(sessionId, aiResponse.updatedMessages);
+          const replyText = aiResponse.reply.toLowerCase();
+          const shouldHangUp = replyText.includes("goodbye") || replyText.includes("have a great day");
+          const spokenContent = aiResponse.reply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
+          if(shouldHangUp){
+            aiResponse.pendingSignals.push({ action: "END_CHAT" });
+          }          
+          // Send back to Retell
+          const responsePayload = {
+            response_type: "response",
+            response_id: event.response_id, 
+            content: spokenContent || "Hold on one moment please.",
+            content_complete: true,
+            end_call: shouldHangUp
+          };
+          
+          ws.send(JSON.stringify(responsePayload));
+          if (spokenContent) {
+            widgetController.sendSignal(sessionId, { action: "CHAT_REPLY", reply: spokenContent });
+          }
+          aiResponse.pendingSignals.forEach((signal: any) => {
+             widgetController.sendSignal(sessionId, signal);
+          });
+        }
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) {
+           console.error(`[${callId}] WebSocket Error:`, error);
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      console.log(`[${callId}] Call disconnected.`);
+      if (sessionId) {
+        activeCalls.delete(sessionId);
+      }
+    });
+  }
+};
