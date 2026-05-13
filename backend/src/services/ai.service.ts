@@ -321,13 +321,36 @@ export const aiService = {
         // 1. Scrub raw JSON tool hallucinations (e.g., {"type": "function", ...})
         const jsonToolRegex = /\{[\s\n]*"type"[\s\n]*:[\s\n]*"function"[\s\S]*?\}/ig;
         if (jsonToolRegex.test(finalReply)) {
-           finalReply = finalReply.replace(jsonToolRegex, '').trim();
-           // Manually push the calendar signal if we caught it hallucinating the calendar tool
-           if (!pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ 
-                 action: "SHOW_SLOT_PICKER", 
-                 data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] }
-               });
+           // Figure out WHICH tool it hallucinated before we delete the string
+           const isHangUpJSON = finalReply.includes("endConversation");
+           const isDetailsJSON = finalReply.includes("requestCustomerDetails");
+           const isImageJSON = finalReply.includes("requestImageUpload");
+           const isPaymentJSON = finalReply.includes("resendPaymentPopup");
+           const isCalendarJSON = finalReply.includes("checkCalendarAvailability");
+
+           // Strip the JSON block and clean up trailing braces (Fixes the Flutter bug!)
+           finalReply = finalReply.replace(jsonToolRegex, '').replace(/}$/, '').trim();
+           
+           // Route to the correct UI signal AND update the Redis State Machine! (Fixes the State Desync bug!)
+           if (isHangUpJSON && !pendingSignals.some(s => s.action === "END_CHAT")) {
+               pendingSignals.push({ action: "END_CHAT" });
+           }
+           if (isImageJSON && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
+               pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+               await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
+           }
+           if (isPaymentJSON && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
+               pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
+               await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
+           }
+           if (isDetailsJSON && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
+              pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
+              await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS");
+           }
+           if (isCalendarJSON && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
+               const hallucinatedDate = state.selectedDate || new Date().toISOString();
+               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: hallucinatedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+               await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: hallucinatedDate });
            }
         }
 
@@ -341,21 +364,34 @@ export const aiService = {
 
           finalReply = finalReply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
           
-          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
-          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
-          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
+          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) {
+              pendingSignals.push({ action: "END_CHAT" });
+          }
+          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
+              pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+              await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
+          }
+          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
+              pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
+              await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
+          }
           if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
               pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
+              await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS");
           }
           if (isCalendar && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+               const hallucinatedDate = state.selectedDate || new Date().toISOString();
+               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: hallucinatedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+               await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: hallucinatedDate });
           }
         } else if (finalReply.includes("endConversation")) {
            if (finalReply.includes("{") && finalReply.includes("}")) {
                finalReply = finalReply.replace(/{.*endConversation.*}/s, "").trim(); 
                if (!finalReply) finalReply = "Have a great day!";
            }
-           if (!pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
+           if (!pendingSignals.some(s => s.action === "END_CHAT")) {
+              pendingSignals.push({ action: "END_CHAT" });
+           }
         }
       return { 
         reply: finalReply,
