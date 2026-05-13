@@ -39,10 +39,21 @@ export const widgetController = {
 
           if (!finalUserMessage) return;
 
-          // 2. Send directly to Orchestrator (It handles history fetching, saving, and locks internally!)
-          const aiResponse = await aiService.generateResponse(finalUserMessage, orgId, sessionId);
+          // 2. Fetch Chat History (Filter out old system prompts so they don't bloat memory)
+          let chatHistory = await redisService.getSessionHistory(sessionId);
+          chatHistory = chatHistory.filter((msg: any) => msg.role !== "system");
+
+          // 3. Append User Message
+          chatHistory.push({ role: "user", content: finalUserMessage });
+
+          // 4. Send to Orchestrator (The promptBuilder injects the state rules dynamically!)
+          const aiResponse = await aiService.generateResponse(chatHistory, orgId, sessionId);
           
-          // 3. Voice Interruption Logic
+          // 5. Save Clean History
+          await redisService.saveSessionHistory(sessionId, aiResponse.updatedMessages);
+          
+
+          // 7. Voice Interruption Logic
           const activeVoiceSocket = activeCalls.get(sessionId);
           if (activeVoiceSocket) {
             logger.info(`UI input received during active voice call. Interrupting Retell for session ${sessionId}...`);
@@ -63,7 +74,7 @@ export const widgetController = {
             return; 
           }
 
-          // 4. Standard Text Chat Reply
+          // 8. Standard Text Chat Reply
           if (aiResponse.reply) {
             const cleanReply = aiResponse.reply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
             if (cleanReply) {
@@ -79,8 +90,9 @@ export const widgetController = {
                       ws.send(JSON.stringify(signal));
                       logger.info(`Delayed END_CHAT signal sent for session ${sessionId}`);
                    }
-                }, 3000); 
+                }, 3000); // 3-second delay
              } else {
+                // Otherwise, send the popup/form signal instantly
                 ws.send(JSON.stringify(signal));
              }
           });

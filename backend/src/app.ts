@@ -47,15 +47,17 @@ app.use(
   })
 );
 //TODO: need to fix the cors for production grade later. currently open for local testing
+/* app.use(cors({
+  origin: [
+    "http://localhost:50778",
+    "https://app.example.com",
+    "http://localhost:5173"
+  ],
+  credentials: true,
+})); */
 app.use(cors({
   origin: true,
   credentials: true,
-  // origin: [
-  //   "*", // Your local Vite frontend
-  //   // "https://your-future-client-website.com" <-- You will add real domains here later
-  // ],
-  // methods: ["GET", "POST", "OPTIONS"],
-  // credentials: true, // Required if we ever add cookies or strict auth tokens
 }));
 app.use(express.json());
 app.use(express.static('public'));

@@ -43,11 +43,11 @@ export function ChatWidget() {
 
     try {
       // 2. Send to our Node.js backend
-      const response = await axios.post("http://localhost:8080/api/v1/chat", {
+      const response = await axios.post("https://moltenly-undeflective-carol.ngrok-free.dev/api/v1/chat"/*"http://localhost:8080/api/v1/chat"*/, {
         companyId,
         sessionId,
         message: userMessage,
-      });
+      },{headers:{"ngrok-skip-browser-warning": "69420"}});
 
       // 3. Add the AI's reply to the UI
       setMessages((prev) => [...prev, { role: "assistant", content: response.data.reply }]);

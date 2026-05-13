@@ -3,7 +3,7 @@ import type{ OrganizationData } from '../App';
 import Widget from './Widget';
 import { CheckCircle2, FlaskConical, LayoutDashboard } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8080/api/v2'; 
+const API_BASE = "https://moltenly-undeflective-carol.ngrok-free.dev/api/v2"/*'http://localhost:8080/api/v2'*/; 
 
 export default function Playground({ orgData, sessionId, onReset }: { orgData: OrganizationData, sessionId: string, onReset: () => void }) {
   const [confirming, setConfirming] = useState(false);
@@ -13,7 +13,7 @@ export default function Playground({ orgData, sessionId, onReset }: { orgData: O
     try {
       const res = await fetch(`${API_BASE}/organizations/confirm-registration`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json',"ngrok-skip-browser-warning": "69420" },
         body: JSON.stringify({
           organizationId: orgData.id,
           paymentUrl: "https://stripe.com/fake-url",

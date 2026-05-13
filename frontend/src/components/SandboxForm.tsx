@@ -3,7 +3,7 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import type { OrganizationData } from '../App';
 
 // Update this to your actual backend URL
-const API_BASE = 'http://localhost:8080/api/v2'; 
+const API_BASE = 'https://moltenly-undeflective-carol.ngrok-free.dev/api/v2';//'http://localhost:8080/api/v2'; 
 interface BusinessType {
   id: string;
   name: string;
@@ -14,7 +14,7 @@ export default function SandboxForm({ onBack, onSuccess }: { onBack: () => void,
   const [formData, setFormData] = useState({ name: '', email: '', phone: '', businessTypeId: '', description: '' });
 
   useEffect(() => {
-    fetch(`${API_BASE}/organizations/business-types`)
+    fetch(`${API_BASE}/organizations/business-types`,{ headers: { 'Content-Type': 'application/json',"ngrok-skip-browser-warning": "69420" }})
       .then(res => res.json())
       .then(data => setBusinessTypes(data.data || []))
       .catch(console.error);
@@ -26,7 +26,7 @@ export default function SandboxForm({ onBack, onSuccess }: { onBack: () => void,
     try {
       const res = await fetch(`${API_BASE}/organizations/sandbox`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json',"ngrok-skip-browser-warning": "69420" },
         body: JSON.stringify(formData)
       });
       const result = await res.json();

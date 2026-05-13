@@ -7,10 +7,7 @@ import { logger } from "../utils/logger.js";
 import { AppError } from "../utils/AppError.js";
 import { redisService } from "./redis.service.js";
 import { promptBuilder } from "./prompt.builder.js"; 
-import crypto from "crypto"; 
-
-// NEW: The Session Mutex Lock Queue
-const sessionLocks = new Map<string, Promise<any>>();
+import crypto from "crypto"; // Added for Soft Hold token generation
 
 // Initialize the Groq SDK
 const groq = new Groq({ apiKey: env.GROQ_API_KEY });
@@ -34,6 +31,7 @@ export const aiService = {
         temperature: 0.2, 
       });
 
+      // FIX: Added to access the first choice array element
       return response.choices[0].message.content || "I see an image, but I can't determine the exact plumbing issue.";
     } catch (error) {
       logger.error("Vision API Error:", error);
@@ -41,66 +39,25 @@ export const aiService = {
     }
   },
 
-  // =====================================================================
-  // THE SECURE ENTRY POINT (HANDLES LOCKS & HISTORY)
-  // =====================================================================
-  async generateResponse(userMessage: string, companyId: string, sessionId: string): Promise<{ reply: string, pendingSignals: any[] }> {
-    // 1. Get the existing promise queue for this session, or start a new one
-    const priorPromise = sessionLocks.get(sessionId) || Promise.resolve();
-
-    // 2. Chain the new request to the end of the queue
-    const currentPromise = priorPromise.then(async () => {
-      // Fetch History FRESH from Redis inside the lock!
-      let chatHistory = await redisService.getSessionHistory(sessionId);
-      let cleanHistory = chatHistory.filter((msg: any) => msg.role !== "system");
-      
-      if (userMessage) {
-        cleanHistory.push({ role: "user", content: userMessage });
-      }
-
-      // Execute the actual AI turn
-      const result = await this._processTurn(cleanHistory, companyId, sessionId, 0);
-
-      // Save History before releasing the lock!
-      await redisService.saveSessionHistory(sessionId, result.updatedMessages);
-
-      return { 
-        reply: result.reply,
-        pendingSignals: result.pendingSignals
-      };
-    }).catch((error) => {
-      logger.error(`Promise Chain Error for session ${sessionId}:`, error);
-      throw error;
-    });
-
-    // 3. Update the map with the new tail of the chain
-    sessionLocks.set(sessionId, currentPromise);
-
-    // 4. Clean up the map to prevent memory leaks when the chain finishes
-    currentPromise.finally(() => {
-      if (sessionLocks.get(sessionId) === currentPromise) {
-        sessionLocks.delete(sessionId);
-      }
-    });
-
-    return currentPromise;
-  },
-
-  // =====================================================================
-  // THE ORCHESTRATOR CORE (YOUR EXISTING LOGIC)
-  // =====================================================================
-  async _processTurn(chatHistory: any[], companyId: string, sessionId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[], pendingSignals: any[] }> {
+  async generateResponse(chatHistory: any[], companyId: string, sessionId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[], pendingSignals: any[] }> {
     try {
       let pendingSignals: any[] = [];
       let state = await redisService.getSessionState(sessionId);
       
-      const lastMsg = chatHistory[chatHistory.length - 1]?.content || "";
+      // Filter out old system prompts so we don't duplicate them in the array
+      let cleanHistory = chatHistory.filter(m => m.role !== "system");
+      const lastMsg = cleanHistory[cleanHistory.length - 1]?.content || "";
 
+      // =====================================================================
       // 1. THE BACKEND INTERCEPTORS (HARD STATE JUMPS)
+      // =====================================================================
+      
+      // A. Image Uploaded -> Jump to Date Selection
       if (state.currentState === "STATE_3_IMAGE_UPLOAD" && lastMsg.includes("Vision Analysis:")) {
         state = await redisService.transitionState(sessionId, "STATE_4_DATE_SELECTION", { imageAnalyzed: true });
       }
       
+      // B. Details Submitted -> SOFT HOLD -> Jump to Payment
       if (state.currentState === "STATE_6_CUSTOMER_DETAILS" && lastMsg.includes("[SYSTEM_DETAILS_SUBMITTED]")) {
         const nameMatch = lastMsg.match(/Name:\s*([^,]+)/);
         const emailMatch = lastMsg.match(/Email:\s*([^,]+)/);
@@ -112,16 +69,22 @@ export const aiService = {
            phone: phoneMatch ? phoneMatch[1].trim() : "Unknown"
         };
 
+        // SOFT HOLD LOGIC: Generate a temporary hold token, but DO NOT book the calendar yet!
         const tempToken = `HOLD_${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
         
+        // Push UI Signal and Transition State to Payment
         pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: tempToken } });
         
+        // Save the details to Redis so we have them ready when they actually pay
         state = await redisService.transitionState(sessionId, "STATE_7_PAYMENT", { customerDetails, trackingToken: tempToken });
         
-        chatHistory[chatHistory.length - 1].content = `[SYSTEM] The user submitted their details. The slot is on a soft hold. Command: Tell the user you have reserved the slot and ask them to complete the advance payment on their screen.`;
+        // Command the AI
+        cleanHistory[cleanHistory.length - 1].content = `[SYSTEM] The user submitted their details. The slot is on a soft hold. Command: Tell the user you have reserved the slot and ask them to complete the advance payment on their screen.`;
       }
 
+      // C. Payment Successful -> HARD BOOKING -> Jump to Confirmation
       if (state.currentState === "STATE_7_PAYMENT" && lastMsg.includes("[SYSTEM_PAYMENT_SUCCESSFUL]")) {
+        // NOW we reconstruct the booking args from our Redis memory state and book it!
         const organization = await db.organization.findUnique({ where: { id: companyId }, select: { status: true }});
         
         const bookingArgs = {
@@ -142,26 +105,33 @@ export const aiService = {
         state = await redisService.transitionState(sessionId, "STATE_8_CONFIRMATION", { trackingToken: finalToken });
       }
 
+      // =====================================================================
       // 2. DYNAMIC PROMPT INJECTION
+      // =====================================================================
       const currentDateTime = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
       const { prompt, allowedTools } = promptBuilder.buildStateContext(state, currentDateTime);
       
-      const messages = [{ role: "system", content: prompt }, ...chatHistory];
+      const messages = [{ role: "system", content: prompt }, ...cleanHistory];
 
+      // =====================================================================
       // 3. CALL GROQ
+      // =====================================================================
       const response = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: "llama-3.3-70b-versatile",//"llama-3.1-8b-instant",
         messages: messages,
         tools: allowedTools.length > 0 ? allowedTools : undefined,
         tool_choice: allowedTools.length > 0 ? "auto" : "none",
         parallel_tool_calls: false,
       });
 
+      // FIX: Added to access the first choice array element
       const responseMessage = response.choices[0].message;
       const toolCalls = responseMessage.tool_calls;
       messages.push(responseMessage);
 
+      // =====================================================================
       // 4. TOOL ROUTER (TRANSITIONS & UI TRIGGERS)
+      // =====================================================================
       if (toolCalls && toolCalls.length > 0) {
         const organization = await db.organization.findUnique({ where: { id: companyId }, select: { status: true }});
         const isSandbox = organization?.status === "SANDBOX";
@@ -189,8 +159,9 @@ export const aiService = {
           else if (functionName === "checkCalendarAvailability") {
             const requestedDate = new Date(functionArgs.dateIsoString);
             const today = new Date();
-            today.setHours(0, 0, 0, 0); 
+            today.setHours(0, 0, 0, 0); // Strip the exact time, just check the day
 
+            // BACKEND GUARDRAIL: Catch Past Dates
             if (requestedDate < today) {
               logger.warn(`User tried to book a past date: ${functionArgs.dateIsoString}`);
               functionResult = { 
@@ -198,6 +169,7 @@ export const aiService = {
                 message: "SYSTEM WARNING: The requested date is in the past! Do not book this. Tell the user the date has already passed and explicitly ask them for a current or future date." 
               };
             } else {
+              // Valid Future Date -> Proceed with booking
               functionResult = isSandbox
                 ? await mockCalendarService.checkAvailability(companyId, functionArgs.dateIsoString)
                 : await calendarService.checkAvailability(companyId, functionArgs.dateIsoString); 
@@ -226,6 +198,7 @@ export const aiService = {
                 { label: "Phone Number", keyboard_type: "phone" }
               ]
             });
+            // FIX: Explicitly tell the AI not to say goodbye!
             functionResult = { 
               success: true, 
               message: "Slot saved. Customer details form opened automatically. Tell the user to enter their details in the form. DO NOT say goodbye or confirm the appointment yet, payment is still required." 
@@ -259,106 +232,105 @@ export const aiService = {
         }
 
         const secondResponse = await groq.chat.completions.create({
-          model: "llama-3.3-70b-versatile",
+          model: "llama-3.3-70b-versatile",//"llama-3.1-8b-instant",
           messages: messages,
         });
         
+        // FIX: Added to access the first choice array element
         messages.push(secondResponse.choices[0].message);
         let finalReply = secondResponse.choices[0].message.content ?? "";
 
-        // 🚨 CRITICAL FALLBACK: Catch ALL hallucinated tags and JSON
-        
-        // 1. Scrub raw JSON tool hallucinations (e.g., {"type": "function", ...})
-        const jsonToolRegex = /\{[\s\n]*"type"[\s\n]*:[\s\n]*"function"[\s\S]*?\}/ig;
-        if (jsonToolRegex.test(finalReply)) {
-           finalReply = finalReply.replace(jsonToolRegex, '').trim();
-           // Manually push the calendar signal if we caught it hallucinating the calendar tool
-           if (!pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ 
-                 action: "SHOW_SLOT_PICKER", 
-                 data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] }
-               });
-           }
-        }
-
-        // 2. Scrub HTML-style hallucinations
+        // 🚨 CRITICAL FALLBACK: Catch hallucinated tool tags safely
         if (finalReply.includes("<function")) {
           const isHangUp = finalReply.includes("endConversation");
           const isDetails = finalReply.includes("requestCustomerDetails");
           const isImage = finalReply.includes("requestImageUpload");
           const isPayment = finalReply.includes("resendPaymentPopup");
-          const isCalendar = finalReply.includes("checkCalendarAvailability");
 
+          // Strip the ugly tags from the text
           finalReply = finalReply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
           
-          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
-          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
-          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
-          if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
-              pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
+          // Execute the intended manual override signals
+          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) {
+              pendingSignals.push({ action: "END_CHAT" });
           }
-          if (isCalendar && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+          if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
+              pendingSignals.push({
+                action: "TAKE_INPUT",
+                data: [
+                  { label: "Name", keyboard_type: "text" },
+                  { label: "Email Address", keyboard_type: "emailAddress" },
+                  { label: "Phone Number", keyboard_type: "phone" }
+                ]
+              });
+          }
+          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
+              pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+          }
+          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
+              pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
           }
         } else if (finalReply.includes("endConversation")) {
+           // Catch JSON/Text hallucinations of the tool
            if (finalReply.includes("{") && finalReply.includes("}")) {
                finalReply = finalReply.replace(/{.*endConversation.*}/s, "").trim(); 
                if (!finalReply) finalReply = "Have a great day!";
            }
-           if (!pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
+           if (!pendingSignals.some(s => s.action === "END_CHAT")) {
+              pendingSignals.push({ action: "END_CHAT" });
+           }
         }
         return { 
-          reply: finalReply,
+          // FIX: Added to access the first choice array element
+          reply: finalReply,//secondResponse.choices[0].message.content ?? "",
           updatedMessages: messages,
           pendingSignals
         };
       }
-      
       let finalReply = responseMessage.content ?? "";
 
-      // 🚨 CRITICAL FALLBACK: Catch ALL hallucinated tags and JSON
-        
-        // 1. Scrub raw JSON tool hallucinations (e.g., {"type": "function", ...})
-        const jsonToolRegex = /\{[\s\n]*"type"[\s\n]*:[\s\n]*"function"[\s\S]*?\}/ig;
-        if (jsonToolRegex.test(finalReply)) {
-           finalReply = finalReply.replace(jsonToolRegex, '').trim();
-           // Manually push the calendar signal if we caught it hallucinating the calendar tool
-           if (!pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ 
-                 action: "SHOW_SLOT_PICKER", 
-                 data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] }
-               });
-           }
-        }
-
-        // 2. Scrub HTML-style hallucinations
+      // 🚨 CRITICAL FALLBACK: Catch hallucinated tool tags safely
         if (finalReply.includes("<function")) {
           const isHangUp = finalReply.includes("endConversation");
           const isDetails = finalReply.includes("requestCustomerDetails");
           const isImage = finalReply.includes("requestImageUpload");
           const isPayment = finalReply.includes("resendPaymentPopup");
-          const isCalendar = finalReply.includes("checkCalendarAvailability");
 
+          // Strip the ugly tags from the text
           finalReply = finalReply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
           
-          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
-          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
-          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
-          if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
-              pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
+          // Execute the intended manual override signals
+          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) {
+              pendingSignals.push({ action: "END_CHAT" });
           }
-          if (isCalendar && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+          if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
+              pendingSignals.push({
+                action: "TAKE_INPUT",
+                data: [
+                  { label: "Name", keyboard_type: "text" },
+                  { label: "Email Address", keyboard_type: "emailAddress" },
+                  { label: "Phone Number", keyboard_type: "phone" }
+                ]
+              });
+          }
+          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
+              pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+          }
+          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
+              pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
           }
         } else if (finalReply.includes("endConversation")) {
+           // Catch JSON/Text hallucinations of the tool
            if (finalReply.includes("{") && finalReply.includes("}")) {
                finalReply = finalReply.replace(/{.*endConversation.*}/s, "").trim(); 
                if (!finalReply) finalReply = "Have a great day!";
            }
-           if (!pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
+           if (!pendingSignals.some(s => s.action === "END_CHAT")) {
+              pendingSignals.push({ action: "END_CHAT" });
+           }
         }
       return { 
-        reply: finalReply,
+        reply: finalReply,//responseMessage.content ?? "",
         updatedMessages: messages,
         pendingSignals
       };
@@ -371,8 +343,7 @@ export const aiService = {
           role: "system",
           content: "SYSTEM ERROR: Your previous tool call failed due to malformed syntax. DO NOT output raw <function> tags. Output ONLY the strict JSON required to trigger the tool."
         });
-        // FIX: Ensure retries call the internal _processTurn function, avoiding a new lock!
-        return this._processTurn(chatHistory, companyId, sessionId, retryCount + 1);
+        return this.generateResponse(chatHistory, companyId, sessionId, retryCount + 1);
       }
       logger.error("Groq AI Service Error:", error);
       throw new AppError("Failed to generate AI response.", 502);

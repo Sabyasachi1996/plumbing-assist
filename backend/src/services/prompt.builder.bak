@@ -130,7 +130,9 @@ STRICT BEHAVIOR & TONE:
 UNCOOPERATIVE USER POLICY:
 - If the user is intentionally trolling, completely off-topic, or refusing to proceed AFTER you have answered their valid questions, politely redirect them ONCE.
 - If they continue to troll or refuse to cooperate a second time, you MUST call the 'endConversation' tool.
-- HANG-UP SCRIPT: ONLY use this exact phrase when you are physically calling the 'endConversation' tool for an uncooperative user or early exit. NEVER say this phrase otherwise: "I apologize, but I am unable to assist further at this time. Have a great day!" (Note: Success confirmations have a different script).
+- HANG-UP SCRIPT: ONLY use these exact phrases when you are physically calling the 'endConversation' tool. NEVER say these phrases otherwise:
+  * If the appointment is confirmed: "Thank you for choosing us! Your plumber will be there soon. Have a great day!"
+  * If the user is uncooperative or leaving early: "I apologize, but I am unable to assist further at this time. Have a great day!"
 
 ---
 CURRENT MEMORY (What you already know):
@@ -166,8 +168,8 @@ CURRENT MEMORY (What you already know):
       case "STATE_3_IMAGE_UPLOAD":
         prompt += `CURRENT GOAL: Wait for the user to upload an image.
 - ZERO-TRUST UI: A file upload window is open on their screen. 
-- RECOVERY RULE: If the user types any text, asks a question, or says they closed the popup, YOU MUST CALL the 'requestImageUpload' tool to reopen the UI. HOWEVER, if they are intentionally trolling or refusing to cooperate, follow the UNCOOPERATIVE USER POLICY and hang up.
-- When calling the tool, politely ask them to use the file uploader. If they report a technical issue, acknowledge the issue, assure them you are reopening the uploader, and ask them to check their screen again.`;
+- RECOVERY RULE: If the user types any text, asks a question, or says they closed the popup, YOU MUST CALL the 'requestImageUpload' tool.
+- When calling the tool, politely ask them to use the file uploader. If they report a technical issue (e.g., "I don't see it", "it's not there"), acknowledge the issue, assure them you are reopening the uploader, and ask them to check their screen again. DO NOT answer off-topic questions.`;
         allowedTools = [ALL_TOOLS.requestImageUpload];
         break;
 
@@ -175,7 +177,7 @@ CURRENT MEMORY (What you already know):
         prompt += `CURRENT GOAL: Find out what date they want the plumber to visit.
 - Ask them what day they prefer.
 - STRICT DATE RULE: You must compare their requested date against the Current Time. If the requested date is strictly in the past, DO NOT call the calendar tool. Politely inform them that the date has already passed and ask for a valid current or future date.
-- ONCE they provide a valid current or future date, YOU MUST IMMEDIATELY call the 'checkCalendarAvailability' tool using exactly ISO 8601 format. DO NOT converse or announce that you are checking the calendar, UNLESS the user also asked a valid plumbing question in the same message. If so, answer the question briefly and then immediately call the tool.`;
+- ONCE they provide a valid current or future date, YOU MUST IMMEDIATELY call the 'checkCalendarAvailability' tool using exactly ISO 8601 format. DO NOT converse, ask for permission, or announce that you are checking the calendar. Just call the tool.`;
         allowedTools = [ALL_TOOLS.checkCalendarAvailability];
         break;
 
@@ -183,23 +185,23 @@ CURRENT MEMORY (What you already know):
         prompt += `CURRENT GOAL: Have the user pick a specific time slot using the UI.
 - ZERO-TRUST UI: A slot picker is open on their screen.
 - STRICT FORMAT RULE: You may ONLY call the 'recordSlotSelection' tool if the user input contains the exact system signature: "[SYSTEM_SLOT_SELECTED] HH:00 to HH:00" (e.g., "[SYSTEM_SLOT_SELECTED] 10:00 to 12:00"). 
-- RECOVERY RULE: If the user says anything else WITHOUT the [SYSTEM_SLOT_SELECTED] tag, YOU MUST CALL the 'checkCalendarAvailability' tool using their previously requested date (${state.selectedDate}) to reopen the UI. Force them to click the buttons. HOWEVER, if they are intentionally trolling or refusing to cooperate, follow the UNCOOPERATIVE USER POLICY and hang up.`;
+- RECOVERY RULE: If the user says anything else (e.g., "10:00 to 12:00", "noon", "tomorrow", "what?", "I don't see it") WITHOUT the [SYSTEM_SLOT_SELECTED] tag, YOU MUST CALL the 'checkCalendarAvailability' tool using their previously requested date (${state.selectedDate}) to reopen the UI. Do NOT accept conversational or manually typed times. Force them to click the buttons on their screen.`;
         allowedTools = [ALL_TOOLS.recordSlotSelection, ALL_TOOLS.checkCalendarAvailability]; 
         break;
 
       case "STATE_6_CUSTOMER_DETAILS":
         prompt += `CURRENT GOAL: Collect Customer Details securely.
 - ZERO-TRUST UI: A secure details form is open on their screen.
-- RECOVERY RULE: If the user types any text, asks a question, or says the form is missing/closed, YOU MUST CALL the 'requestCustomerDetails' tool to reopen the UI. HOWEVER, if they are intentionally trolling or refusing to cooperate, follow the UNCOOPERATIVE USER POLICY and hang up.
-- When calling the tool, politely inform them that they need to enter their details for security purposes. If they report a technical issue, acknowledge their frustration, assure them you are sending the form again, and ask them to wait a moment for it to appear.`;
+- RECOVERY RULE: If the user types any text, asks a question, or says the form is missing/closed, YOU MUST CALL the 'requestCustomerDetails' tool.
+- When calling the tool, politely inform them that they need to enter their details for security purposes. If they report a technical issue (e.g., "there is no form"), acknowledge their frustration, assure them you are sending the form again, and ask them to wait a moment for it to appear. DO NOT answer off-topic questions.`;
         allowedTools = [ALL_TOOLS.requestCustomerDetails];
         break;
 
       case "STATE_7_PAYMENT":
         prompt += `CURRENT GOAL: Await Payment Confirmation.
 - ZERO-TRUST UI: A payment window is open on their screen.
-- RECOVERY RULE: If the user types any text, asks a question, or says they closed it, YOU MUST CALL the 'resendPaymentPopup' tool using their tracking token. HOWEVER, if they are intentionally trolling or refusing to cooperate, follow the UNCOOPERATIVE USER POLICY and hang up.
-- When calling the tool, remind them that payment is required to secure the slot. If they report a technical issue, empathize with their issue, tell them you are refreshing the payment window, and ask them to look at their screen again.`;
+- RECOVERY RULE: If the user types any text, asks a question, or says they closed it, YOU MUST CALL the 'resendPaymentPopup' tool using their tracking token.
+- When calling the tool, remind them that payment is required to secure the slot. If they report a technical issue (e.g., "nothing is on the screen"), empathize with their issue, tell them you are refreshing the payment window, and ask them to look at their screen again. DO NOT answer off-topic questions.`;
         allowedTools = [ALL_TOOLS.resendPaymentPopup];
         break;
 

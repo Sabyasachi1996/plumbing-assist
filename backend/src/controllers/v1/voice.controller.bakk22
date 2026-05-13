@@ -64,6 +64,7 @@ export const voiceController = {
         });
         console.log(`[${callId}] Redis Match Found! Synced to Session: ${sessionId}`);
       } else {
+        //TODO:CHECK IF WE HAVE TO CLOSE THE SOCKET HERE OR NOT
         console.error(`[${callId}] CRITICAL: No variables found in Redis for this call!`);
       }
     }).catch(err => console.error(`[${callId}] Redis Error:`, err));
@@ -87,14 +88,25 @@ export const voiceController = {
           const lastUserMessage = transcript[transcript.length - 1].content;
           console.log(`[${callId}] User said: ${lastUserMessage}`);
 
-          // 1. Let Orchestrator handle state, history, locks, dynamic prompts, and tool calls
-          const aiResponse = await aiService.generateResponse(lastUserMessage, companyId, sessionId);
+          // 1. Fetch History & Filter old system prompts
+          let chatHistory = await redisService.getSessionHistory(sessionId);
+          chatHistory = chatHistory.filter((msg: any) => msg.role !== "system");
+
+          // 2. Push user message
+          chatHistory.push({ role: "user", content: lastUserMessage });
+
+          // 3. Let Orchestrator handle state, dynamic prompts, and tool calls
+          const aiResponse = await aiService.generateResponse(chatHistory, companyId, sessionId);
+          
+          // 4. Save clean history
+          await redisService.saveSessionHistory(sessionId, aiResponse.updatedMessages);
           
           const spokenContent = aiResponse.reply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
           
+          // Instead of text matching, check if the tool router pushed the END_CHAT signal!
           const shouldHangUp = aiResponse.pendingSignals.some((signal: any) => signal.action === "END_CHAT");        
           
-          // 2. Send voice payload back to Retell
+          // 5. Send voice payload back to Retell
           const responsePayload = {
             response_type: "response",
             response_id: event.response_id, 
@@ -105,12 +117,14 @@ export const voiceController = {
           
           ws.send(JSON.stringify(responsePayload));
           
-          // 3. Sync UI
+          // 6. Sync UI
           if (spokenContent) {
             widgetController.sendSignal(sessionId, { action: "CHAT_REPLY", reply: spokenContent });
           }
           
           aiResponse.pendingSignals.forEach((signal: any) => {
+            // FIX: Do NOT send END_CHAT to the widget during a voice call!
+            // Let Retell speak the goodbye and trigger the 'call_ended' SDK event naturally.
             if (signal.action !== "END_CHAT") {
               widgetController.sendSignal(sessionId, signal);
             }
