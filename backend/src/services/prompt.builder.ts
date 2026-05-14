@@ -21,7 +21,23 @@ const ALL_TOOLS = {
     type: "function",
     function: {
       name: "skipImageUpload",
-      description: "Call this tool if the user explicitly says NO to uploading an image.",
+      description: "Call this tool if the user explicitly says NO to uploading an image, or NO to uploading any more images.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  proceedToScheduling: {
+    type: "function",
+    function: {
+      name: "proceedToScheduling",
+      description: "Call this tool ONCE the user confirms they want to proceed and schedule a plumber.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  requestPaymentPopup: {
+    type: "function",
+    function: {
+      name: "requestPaymentPopup",
+      description: "Call this tool ONCE the user explicitly agrees to pay the advance amount.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -170,7 +186,23 @@ CURRENT MEMORY (What you already know):
 - When calling the tool, politely ask them to use the file uploader. If they report a technical issue, acknowledge the issue, assure them you are reopening the uploader, and ask them to check their screen again.`;
         allowedTools = [ALL_TOOLS.requestImageUpload];
         break;
+    case "STATE_3B_POST_IMAGE_EVAL":
+            prompt += `CURRENT GOAL: Discuss the image and ask if they have more.
+    - Explain what the issue seems to be based on the Vision Analysis.
+    - Briefly explain the procedure to fix it and confidently GUESS a cost estimate (invent a reasonable dollar amount for the demo).
+    - THEN, ask if the user wants to upload ANOTHER image.
+    - If they say YES: Call the 'requestImageUpload' tool.
+    - If they say NO: Call the 'skipImageUpload' tool.`;
+            allowedTools = [ALL_TOOLS.requestImageUpload, ALL_TOOLS.skipImageUpload];
+            break;
 
+        case "STATE_3C_SCHEDULE_INTENT":
+          prompt += `CURRENT GOAL: Ask if they want to schedule a plumber.
+  - Ask the user politely if they would like to proceed further and schedule a plumber to visit.
+  - If they say YES: Call the 'proceedToScheduling' tool.
+  - If they say NO: Call the 'endConversation' tool.`;
+          allowedTools = [ALL_TOOLS.proceedToScheduling]; 
+          break;
       case "STATE_4_DATE_SELECTION":
         prompt += `CURRENT GOAL: Find out what date they want the plumber to visit.
 - Ask them what day they prefer.
@@ -194,7 +226,14 @@ CURRENT MEMORY (What you already know):
 - When calling the tool, politely inform them that they need to enter their details for security purposes. If they report a technical issue, acknowledge their frustration, assure them you are sending the form again, and ask them to wait a moment for it to appear.`;
         allowedTools = [ALL_TOOLS.requestCustomerDetails];
         break;
-
+      case "STATE_6B_PAYMENT_INTENT":
+              prompt += `CURRENT GOAL: Get consent for the advance payment.
+      - Acknowledge that you received their details successfully.
+      - Politely ask the user if they would like to proceed to pay the $70 advance amount to confirm their booking.
+      - If they say YES: Call the 'requestPaymentPopup' tool.
+      - If they say NO: Call the 'endConversation' tool.`;
+              allowedTools = [ALL_TOOLS.requestPaymentPopup];
+              break;
       case "STATE_7_PAYMENT":
         prompt += `CURRENT GOAL: Await Payment Confirmation.
 - ZERO-TRUST UI: A payment window is open on their screen.

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { MessageSquare, Phone, X, Send, Image as ImageIcon, Check, Bot, PhoneOff } from 'lucide-react';
 import { RetellWebClient } from 'retell-client-js-sdk';
 
-const BACKEND_URL = 'http://localhost:8080'; // Update this for production
+const BACKEND_URL = "https://moltenly-undeflective-carol.ngrok-free.dev";//'http://localhost:8080'; // Update this for production
 const WS_URL = BACKEND_URL.replace(/^http/, 'ws');
 
 interface Message {

@@ -9,14 +9,16 @@ import { redisService } from "./redis.service.js";
 import { promptBuilder } from "./prompt.builder.js"; 
 import crypto from "crypto"; 
 
-// NEW: The Session Mutex Lock Queue
+// The Session Mutex Lock Queue ensures parallel voice/text requests process sequentially
 const sessionLocks = new Map<string, Promise<any>>();
 
-// Initialize the Groq SDK
 const groq = new Groq({ apiKey: env.GROQ_API_KEY });
 
 export const aiService = {
-  // NEW VISION FUNCTION
+  
+  // =====================================================================
+  // VISION API: Analyzes uploaded images via LLaVA
+  // =====================================================================
   async analyzeImage(base64Image: string, mimeType: string): Promise<string> {
     try {
       logger.info("AI is analyzing image...");
@@ -42,15 +44,13 @@ export const aiService = {
   },
 
   // =====================================================================
-  // THE SECURE ENTRY POINT (HANDLES LOCKS & HISTORY)
+  // THE SECURE ENTRY POINT: Handles Locks & History Sync
   // =====================================================================
   async generateResponse(userMessage: string, companyId: string, sessionId: string): Promise<{ reply: string, pendingSignals: any[] }> {
-    // 1. Get the existing promise queue for this session, or start a new one
     const priorPromise = sessionLocks.get(sessionId) || Promise.resolve();
 
-    // 2. Chain the new request to the end of the queue
     const currentPromise = priorPromise.then(async () => {
-      // Fetch History FRESH from Redis inside the lock!
+      // 1. Fetch History FRESH from Redis inside the lock
       let chatHistory = await redisService.getSessionHistory(sessionId);
       let cleanHistory = chatHistory.filter((msg: any) => msg.role !== "system");
       
@@ -58,10 +58,10 @@ export const aiService = {
         cleanHistory.push({ role: "user", content: userMessage });
       }
 
-      // Execute the actual AI turn
+      // 2. Execute the actual AI turn
       const result = await this._processTurn(cleanHistory, companyId, sessionId, 0);
 
-      // Save History before releasing the lock!
+      // 3. Save History before releasing the lock
       await redisService.saveSessionHistory(sessionId, result.updatedMessages);
 
       return { 
@@ -73,10 +73,8 @@ export const aiService = {
       throw error;
     });
 
-    // 3. Update the map with the new tail of the chain
     sessionLocks.set(sessionId, currentPromise);
 
-    // 4. Clean up the map to prevent memory leaks when the chain finishes
     currentPromise.finally(() => {
       if (sessionLocks.get(sessionId) === currentPromise) {
         sessionLocks.delete(sessionId);
@@ -87,20 +85,24 @@ export const aiService = {
   },
 
   // =====================================================================
-  // THE ORCHESTRATOR CORE (YOUR EXISTING LOGIC)
+  // THE ORCHESTRATOR CORE: State Machine & Tool Routing
   // =====================================================================
   async _processTurn(chatHistory: any[], companyId: string, sessionId: string, retryCount = 0): Promise<{ reply: string, updatedMessages: any[], pendingSignals: any[] }> {
     try {
       let pendingSignals: any[] = [];
       let state = await redisService.getSessionState(sessionId);
-      
       const lastMsg = chatHistory[chatHistory.length - 1]?.content || "";
 
+      // ---------------------------------------------------------
       // 1. THE BACKEND INTERCEPTORS (HARD STATE JUMPS)
+      // ---------------------------------------------------------
+      
+      // Intercept 1: Image successfully analyzed. Jump to Post-Image Evaluation.
       if (state.currentState === "STATE_3_IMAGE_UPLOAD" && lastMsg.includes("Vision Analysis:")) {
-        state = await redisService.transitionState(sessionId, "STATE_4_DATE_SELECTION", { imageAnalyzed: true });
+        state = await redisService.transitionState(sessionId, "STATE_3B_POST_IMAGE_EVAL", { imageAnalyzed: true });
       }
       
+      // Intercept 2: User submitted their details. Jump to Payment Consent state.
       if (state.currentState === "STATE_6_CUSTOMER_DETAILS" && lastMsg.includes("[SYSTEM_DETAILS_SUBMITTED]")) {
         const nameMatch = lastMsg.match(/Name:\s*([^,]+)/);
         const emailMatch = lastMsg.match(/Email:\s*([^,]+)/);
@@ -114,13 +116,13 @@ export const aiService = {
 
         const tempToken = `HOLD_${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
         
-        pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: tempToken } });
+        // Transition to Consent State (We no longer push the Payment UI here)
+        state = await redisService.transitionState(sessionId, "STATE_6B_PAYMENT_INTENT", { customerDetails, trackingToken: tempToken });
         
-        state = await redisService.transitionState(sessionId, "STATE_7_PAYMENT", { customerDetails, trackingToken: tempToken });
-        
-        chatHistory[chatHistory.length - 1].content = `[SYSTEM] The user submitted their details. The slot is on a soft hold. Command: Tell the user you have reserved the slot and ask them to complete the advance payment on their screen.`;
+        chatHistory[chatHistory.length - 1].content = `[SYSTEM] The user submitted their details. Command: Acknowledge receipt of the details. Then, politely ask the user if they want to pay the $70 advance amount to confirm the booking.`;
       }
 
+      // Intercept 3: User completed payment. Finalize booking and jump to Confirmation.
       if (state.currentState === "STATE_7_PAYMENT" && lastMsg.includes("[SYSTEM_PAYMENT_SUCCESSFUL]")) {
         const organization = await db.organization.findUnique({ where: { id: companyId }, select: { status: true }});
         
@@ -137,18 +139,16 @@ export const aiService = {
             ? await mockCalendarService.bookAppointment(bookingArgs)
             : await calendarService.bookAppointment(bookingArgs);
             
-        const finalToken = rawResult?.trackingToken || state.trackingToken;
-
-        state = await redisService.transitionState(sessionId, "STATE_8_CONFIRMATION", { trackingToken: finalToken });
+        state = await redisService.transitionState(sessionId, "STATE_8_CONFIRMATION", { trackingToken: rawResult?.trackingToken || state.trackingToken });
       }
 
-      // 2. DYNAMIC PROMPT INJECTION
+      // ---------------------------------------------------------
+      // 2. DYNAMIC PROMPT INJECTION & LLM CALL
+      // ---------------------------------------------------------
       const currentDateTime = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
       const { prompt, allowedTools } = promptBuilder.buildStateContext(state, currentDateTime);
-      
       const messages = [{ role: "system", content: prompt }, ...chatHistory];
 
-      // 3. CALL GROQ
       const response = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
         messages: messages,
@@ -161,7 +161,9 @@ export const aiService = {
       const toolCalls = responseMessage.tool_calls;
       messages.push(responseMessage);
 
-      // 4. TOOL ROUTER (TRANSITIONS & UI TRIGGERS)
+      // ---------------------------------------------------------
+      // 3. TOOL ROUTER (TRANSITIONS & UI TRIGGERS)
+      // ---------------------------------------------------------
       if (toolCalls && toolCalls.length > 0) {
         const organization = await db.organization.findUnique({ where: { id: companyId }, select: { status: true }});
         const isSandbox = organization?.status === "SANDBOX";
@@ -178,8 +180,12 @@ export const aiService = {
             functionResult = { success: true, message: "Issue saved. Move to the next step: Ask if they want to upload a photo." };
           } 
           else if (functionName === "skipImageUpload") {
+            await redisService.transitionState(sessionId, "STATE_3C_SCHEDULE_INTENT");
+            functionResult = { success: true, message: "Move to the next step: Ask if they want to proceed to schedule a plumber." };
+          }
+          else if (functionName === "proceedToScheduling") {
             await redisService.transitionState(sessionId, "STATE_4_DATE_SELECTION");
-            functionResult = { success: true, message: "Skipped image. Move to the next step: Ask what date they prefer." };
+            functionResult = { success: true, message: "Move to the next step: Ask what date they prefer." };
           }
           else if (functionName === "requestImageUpload") {
             await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
@@ -193,10 +199,7 @@ export const aiService = {
 
             if (requestedDate < today) {
               logger.warn(`User tried to book a past date: ${functionArgs.dateIsoString}`);
-              functionResult = { 
-                success: false, 
-                message: "SYSTEM WARNING: The requested date is in the past! Do not book this. Tell the user the date has already passed and explicitly ask them for a current or future date." 
-              };
+              functionResult = { success: false, message: "SYSTEM WARNING: The requested date is in the past! Tell the user the date has passed and ask them for a current or future date." };
             } else {
               functionResult = isSandbox
                 ? await mockCalendarService.checkAvailability(companyId, functionArgs.dateIsoString)
@@ -204,15 +207,8 @@ export const aiService = {
               
               await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: functionArgs.dateIsoString });
               
-              const readableDate = requestedDate.toLocaleDateString('en-US', {
-                weekday: 'long', month: 'long', day: 'numeric'
-              });
-
-              pendingSignals.push({ 
-                action: "SHOW_SLOT_PICKER", 
-                data: { date: readableDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] }
-              });
-              
+              const readableDate = requestedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+              pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: readableDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
               functionResult.SYSTEM_INSTRUCTION = "The Slot Picker UI is now open. Tell the user to pick one of the available slots on their screen.";
             }
           }
@@ -220,32 +216,27 @@ export const aiService = {
             await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS", { selectedSlot: functionArgs.selectedSlot });
             pendingSignals.push({
               action: "TAKE_INPUT",
-              data: [
-                { label: "Name", keyboard_type: "text" },
-                { label: "Email Address", keyboard_type: "emailAddress" },
-                { label: "Phone Number", keyboard_type: "phone" }
-              ]
+              data: [ { label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" } ]
             });
-            functionResult = { 
-              success: true, 
-              message: "Slot saved. Customer details form opened automatically. Tell the user to enter their details in the form. DO NOT say goodbye or confirm the appointment yet, payment is still required." 
-            };
+            functionResult = { success: true, message: "Slot saved. Customer details form opened automatically. Tell the user to enter their details in the form." };
           }
           else if (functionName === "requestCustomerDetails") {
             pendingSignals.push({
               action: "TAKE_INPUT",
-              data: [
-                { label: "Name", keyboard_type: "text" },
-                { label: "Email Address", keyboard_type: "emailAddress" },
-                { label: "Phone Number", keyboard_type: "phone" }
-              ]
+              data: [ { label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" } ]
             });
             functionResult = { success: true, message: "Customer details form reopened. Tell the user to use the form." };
+          }
+          else if (functionName === "requestPaymentPopup") {
+            await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
+            pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
+            functionResult = { success: true, message: "Payment modal opened. Tell the user to complete the advance payment on their screen." };
           }
           else if (functionName === "resendPaymentPopup") {
             pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: functionArgs.trackingToken || state.trackingToken } });
             functionResult = { success: true, message: "Payment modal reopened." };
-          }else if (functionName === "endConversation") {
+          }
+          else if (functionName === "endConversation") {
             pendingSignals.push({ action: "END_CHAT" });
             functionResult = { success: true, SYSTEM_INSTRUCTION: "The chat is now ending. Say your polite goodbye script." };
           }
@@ -258,6 +249,7 @@ export const aiService = {
           });
         }
 
+        // Second LLM call to process the tool results
         const secondResponse = await groq.chat.completions.create({
           model: "llama-3.3-70b-versatile",
           messages: messages,
@@ -265,139 +257,18 @@ export const aiService = {
         
         messages.push(secondResponse.choices[0].message);
         let finalReply = secondResponse.choices[0].message.content ?? "";
-
-        // 🚨 CRITICAL FALLBACK: Catch ALL hallucinated tags and JSON
         
-        // 1. Scrub raw JSON tool hallucinations (e.g., {"type": "function", ...})
-        const jsonToolRegex = /\{[\s\n]*"type"[\s\n]*:[\s\n]*"function"[\s\S]*?\}/ig;
-        if (jsonToolRegex.test(finalReply)) {
-           finalReply = finalReply.replace(jsonToolRegex, '').trim();
-           // Manually push the calendar signal if we caught it hallucinating the calendar tool
-           if (!pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ 
-                 action: "SHOW_SLOT_PICKER", 
-                 data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] }
-               });
-           }
-        }
+        // Scrub hallucinations & update states
+        finalReply = await this._scrubHallucinations(finalReply, pendingSignals, state, sessionId);
 
-        // 2. Scrub HTML-style hallucinations
-        if (finalReply.includes("<function")) {
-          const isHangUp = finalReply.includes("endConversation");
-          const isDetails = finalReply.includes("requestCustomerDetails");
-          const isImage = finalReply.includes("requestImageUpload");
-          const isPayment = finalReply.includes("resendPaymentPopup");
-          const isCalendar = finalReply.includes("checkCalendarAvailability");
-
-          finalReply = finalReply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
-          
-          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
-          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
-          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
-          if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
-              pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
-          }
-          if (isCalendar && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: state.selectedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
-          }
-        } else if (finalReply.includes("endConversation")) {
-           if (finalReply.includes("{") && finalReply.includes("}")) {
-               finalReply = finalReply.replace(/{.*endConversation.*}/s, "").trim(); 
-               if (!finalReply) finalReply = "Have a great day!";
-           }
-           if (!pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
-        }
-        return { 
-          reply: finalReply,
-          updatedMessages: messages,
-          pendingSignals
-        };
+        return { reply: finalReply, updatedMessages: messages, pendingSignals };
       }
       
+      // If no tools were called, just return the text
       let finalReply = responseMessage.content ?? "";
+      finalReply = await this._scrubHallucinations(finalReply, pendingSignals, state, sessionId);
 
-      // 🚨 CRITICAL FALLBACK: Catch ALL hallucinated tags and JSON
-        
-        // 1. Scrub raw JSON tool hallucinations (e.g., {"type": "function", ...})
-        const jsonToolRegex = /\{[\s\n]*"type"[\s\n]*:[\s\n]*"function"[\s\S]*?\}/ig;
-        if (jsonToolRegex.test(finalReply)) {
-           // Figure out WHICH tool it hallucinated before we delete the string
-           const isHangUpJSON = finalReply.includes("endConversation");
-           const isDetailsJSON = finalReply.includes("requestCustomerDetails");
-           const isImageJSON = finalReply.includes("requestImageUpload");
-           const isPaymentJSON = finalReply.includes("resendPaymentPopup");
-           const isCalendarJSON = finalReply.includes("checkCalendarAvailability");
-
-           // Strip the JSON block and clean up trailing braces (Fixes the Flutter bug!)
-           finalReply = finalReply.replace(jsonToolRegex, '').replace(/}$/, '').trim();
-           
-           // Route to the correct UI signal AND update the Redis State Machine! (Fixes the State Desync bug!)
-           if (isHangUpJSON && !pendingSignals.some(s => s.action === "END_CHAT")) {
-               pendingSignals.push({ action: "END_CHAT" });
-           }
-           if (isImageJSON && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
-               pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
-               await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
-           }
-           if (isPaymentJSON && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
-               pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
-               await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
-           }
-           if (isDetailsJSON && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
-              pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
-              await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS");
-           }
-           if (isCalendarJSON && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               const hallucinatedDate = state.selectedDate || new Date().toISOString();
-               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: hallucinatedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
-               await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: hallucinatedDate });
-           }
-        }
-
-        // 2. Scrub HTML-style hallucinations
-        if (finalReply.includes("<function")) {
-          const isHangUp = finalReply.includes("endConversation");
-          const isDetails = finalReply.includes("requestCustomerDetails");
-          const isImage = finalReply.includes("requestImageUpload");
-          const isPayment = finalReply.includes("resendPaymentPopup");
-          const isCalendar = finalReply.includes("checkCalendarAvailability");
-
-          finalReply = finalReply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
-          
-          if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) {
-              pendingSignals.push({ action: "END_CHAT" });
-          }
-          if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
-              pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
-              await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
-          }
-          if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
-              pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
-              await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
-          }
-          if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
-              pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
-              await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS");
-          }
-          if (isCalendar && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
-               const hallucinatedDate = state.selectedDate || new Date().toISOString();
-               pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: hallucinatedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
-               await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: hallucinatedDate });
-          }
-        } else if (finalReply.includes("endConversation")) {
-           if (finalReply.includes("{") && finalReply.includes("}")) {
-               finalReply = finalReply.replace(/{.*endConversation.*}/s, "").trim(); 
-               if (!finalReply) finalReply = "Have a great day!";
-           }
-           if (!pendingSignals.some(s => s.action === "END_CHAT")) {
-              pendingSignals.push({ action: "END_CHAT" });
-           }
-        }
-      return { 
-        reply: finalReply,
-        updatedMessages: messages,
-        pendingSignals
-      };
+      return { reply: finalReply, updatedMessages: messages, pendingSignals };
 
     } catch(error: any) {
       const groqError = error?.error?.error || error?.error;      
@@ -407,11 +278,85 @@ export const aiService = {
           role: "system",
           content: "SYSTEM ERROR: Your previous tool call failed due to malformed syntax. DO NOT output raw <function> tags. Output ONLY the strict JSON required to trigger the tool."
         });
-        // FIX: Ensure retries call the internal _processTurn function, avoiding a new lock!
         return this._processTurn(chatHistory, companyId, sessionId, retryCount + 1);
       }
       logger.error("Groq AI Service Error:", error);
       throw new AppError("Failed to generate AI response.", 502);
     }
+  },
+
+  // =====================================================================
+  // HALLUCINATION CATCHER: Cleans raw JSON / HTML tags safely
+  // =====================================================================
+  async _scrubHallucinations(finalReply: string, pendingSignals: any[], state: any, sessionId: string): Promise<string> {
+    const jsonToolRegex = /\{[\s\n]*"type"[\s\n]*:[\s\n]*"function"[\s\S]*?\}/ig;
+    
+    // 1. Scrub raw JSON hallucinations
+    if (jsonToolRegex.test(finalReply)) {
+       const isHangUpJSON = finalReply.includes("endConversation");
+       const isDetailsJSON = finalReply.includes("requestCustomerDetails");
+       const isImageJSON = finalReply.includes("requestImageUpload");
+       const isPaymentJSON = finalReply.includes("resendPaymentPopup") || finalReply.includes("requestPaymentPopup");
+       const isCalendarJSON = finalReply.includes("checkCalendarAvailability");
+
+       finalReply = finalReply.replace(jsonToolRegex, '').replace(/}$/, '').trim();
+       
+       if (isHangUpJSON && !pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
+       if (isImageJSON && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
+           pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+           await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
+       }
+       if (isPaymentJSON && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
+           pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
+           await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
+       }
+       if (isDetailsJSON && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
+          pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
+          await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS");
+       }
+       if (isCalendarJSON && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
+           const hallucinatedDate = state.selectedDate || new Date().toISOString();
+           pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: hallucinatedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+           await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: hallucinatedDate });
+       }
+    }
+
+    // 2. Scrub HTML-style hallucinations
+    if (finalReply.includes("<function")) {
+      const isHangUp = finalReply.includes("endConversation");
+      const isDetails = finalReply.includes("requestCustomerDetails");
+      const isImage = finalReply.includes("requestImageUpload");
+      const isPayment = finalReply.includes("resendPaymentPopup") || finalReply.includes("requestPaymentPopup");
+      const isCalendar = finalReply.includes("checkCalendarAvailability");
+
+      finalReply = finalReply.replace(/<function[\s\S]*?<\/function>/ig, '').trim();
+      
+      if (isHangUp && !pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
+      if (isImage && !pendingSignals.some(s => s.action === "TRIGGER_IMAGE_UPLOAD")) {
+          pendingSignals.push({ action: "TRIGGER_IMAGE_UPLOAD" });
+          await redisService.transitionState(sessionId, "STATE_3_IMAGE_UPLOAD");
+      }
+      if (isPayment && !pendingSignals.some(s => s.action === "SHOW_PAYMENT_MODAL")) {
+          pendingSignals.push({ action: "SHOW_PAYMENT_MODAL", data: { amount: 70, trackingToken: state.trackingToken } });
+          await redisService.transitionState(sessionId, "STATE_7_PAYMENT");
+      }
+      if (isDetails && !pendingSignals.some(s => s.action === "TAKE_INPUT")) {
+          pendingSignals.push({ action: "TAKE_INPUT", data: [{ label: "Name", keyboard_type: "text" }, { label: "Email Address", keyboard_type: "emailAddress" }, { label: "Phone Number", keyboard_type: "phone" }] });
+          await redisService.transitionState(sessionId, "STATE_6_CUSTOMER_DETAILS");
+      }
+      if (isCalendar && !pendingSignals.some(s => s.action === "SHOW_SLOT_PICKER")) {
+           const hallucinatedDate = state.selectedDate || new Date().toISOString();
+           pendingSignals.push({ action: "SHOW_SLOT_PICKER", data: { date: hallucinatedDate, slots: ["10:00 to 12:00", "12:00 to 14:00", "14:00 to 16:00", "16:00 to 18:00"] } });
+           await redisService.transitionState(sessionId, "STATE_5_SLOT_SELECTION", { selectedDate: hallucinatedDate });
+      }
+    } else if (finalReply.includes("endConversation")) {
+       if (finalReply.includes("{") && finalReply.includes("}")) {
+           finalReply = finalReply.replace(/{.*endConversation.*}/s, "").trim(); 
+           if (!finalReply) finalReply = "Have a great day!";
+       }
+       if (!pendingSignals.some(s => s.action === "END_CHAT")) pendingSignals.push({ action: "END_CHAT" });
+    }
+
+    return finalReply;
   }
 };
